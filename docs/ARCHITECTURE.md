@@ -136,6 +136,14 @@ then applies user pins and per-purpose preferences, and prefers loaded, small mo
 work. It tracks health per model and provider, falls back, re-probes providers when none is usable, and emits
 `MODEL_UNAVAILABLE`, `MODEL_RECOVERED` and `MODEL_FALLBACK`.
 
+**Talking to Ollama.** `OllamaProvider` requests a context window (`num_ctx`, default 8192) because Ollama's
+default is small and it silently drops the start of an over-long prompt, which would lose the system prompt. It
+merges configured sampling options, sends tool-call ids back with tool results, strips inline `<think>` traces,
+and never routes a local Ollama through a system HTTP proxy. `models/readiness.py` turns the inventory into
+plain guidance ("Ollama is running but no chat model is installed: `ollama pull llama3.1:8b`") for the startup
+greeting and `jarvis doctor`. `jarvis/diagnostics.py` (`jarvis doctor --live`) runs the whole chain against the
+user's own Ollama in a throwaway data directory.
+
 ### Memory (`memory/`)
 `MemoryStore`: kinds (episodic, semantic, procedural, project, task, preference), FTS5 retrieval blended with
 query-term coverage (BM25 alone is unstable on small corpora), optional embeddings (cosine), and a boost for the
@@ -168,7 +176,12 @@ notifications ("Deployment failed. health check returned 503").
 - `context.py`: layered prompt (rules and style, live state labelled as observed, relevant memory with dates,
   decisions, preferences, recent turns) within a character budget.
 - `orchestrator.py`: dispatch plus the model tool loop (bounded rounds). Long-running tool calls become tasks,
-  and consequential ones become approval requests.
+  and consequential ones become approval requests. The model sees only relevant tools: `device_command` only
+  when devices exist, `delegate_to_agent` only for complex requests. Arguments it invents are dropped before
+  validation. When the grammar matches but its target means nothing to the task system ("how's the weather?",
+  "open the calculator"), the request goes to the model instead; if the model is unavailable or fails, the
+  deterministic answer stands. Answers stream to the interface token by token (`handle(text, on_token=...)`),
+  with reasoning traces and filler openers filtered out on the way.
 
 ### Everything else
 - `automation/`: schedules (`every_s`, `daily_at`) and `WHEN/IF/DO` rules. They run with automation authority,
@@ -204,3 +217,15 @@ notifications ("Deployment failed. health check returned 503").
 Before adding a capability, run through the feature design test in spec §194: input, context, state,
 authority, plan, tools, resources, execution, verification, failure, recovery, memory, notification, UI and
 audit.
+
+## Testing layers
+
+1. **Unit and subsystem tests** (`tests/test_*.py`): in-process, deterministic, about 10 s.
+2. **Acceptance scenarios** (`tests/test_scenarios.py`): the full runtime with a simulated model, metrics and
+   network, exercising the twenty scenarios in spec §200.
+3. **Live integration** (`tests/integration/`, opt-in with `JARVIS_OLLAMA_TESTS=1`): a real Ollama server.
+   *Puppet* models (`tests/integration/puppet.py`) are tiny GGUF files with hand-set weights: one-hot
+   embeddings, zeroed attention and feed-forward, and a lookup-table output layer. They make the real server emit
+   scripted replies, such as a specific `<tool_call>`, so the assertions are exact while the server does real
+   template rendering, llama.cpp inference, tool-call parsing and streaming. `JARVIS_TEST_MODEL` adds
+   capability checks with a real instruction model.

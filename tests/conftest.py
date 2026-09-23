@@ -16,7 +16,9 @@ def pytest_pyfunc_call(pyfuncitem):
     if inspect.iscoroutinefunction(pyfuncitem.obj):
         funcargs = pyfuncitem.funcargs
         kwargs = {name: funcargs[name] for name in pyfuncitem._fixtureinfo.argnames}
-        asyncio.run(asyncio.wait_for(pyfuncitem.obj(**kwargs), timeout=30))
+        # live model tests (real Ollama, possibly on CPU) get far longer than the in-process suite
+        timeout = 900 if pyfuncitem.get_closest_marker("ollama") else 30
+        asyncio.run(asyncio.wait_for(pyfuncitem.obj(**kwargs), timeout=timeout))
         return True
     return None
 

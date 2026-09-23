@@ -8,10 +8,12 @@ as one component among many. You give it intent; it plans, executes through perm
 the result against reality, remembers what matters, keeps watching, and can always explain what it is doing
 and why.
 
-> **Status: v0.1, foundation.** The deterministic core, task engine, permission system, memory, monitoring and
-> conversational layer are implemented and tested: 195 tests, including end-to-end tests for all twenty
-> "final test" scenarios in the specification. Voice, vision, a graphical HUD, communications and physical
-> device integrations are **not implemented yet**; their interfaces and the plan for them are in
+> **Status: v0.1, foundation plus a real conversation.** The deterministic core, task engine, permission system,
+> memory, monitoring and conversational layer are implemented and tested. JARVIS talks through a real Ollama model:
+> natural-language requests reach its tools, tasks, permissions, memory and verification, and answers stream
+> back. The suite has 207 offline tests, including end-to-end tests for all twenty "final test" scenarios in the
+> specification, plus 17 opt-in live tests against a real Ollama server. Voice, vision, a graphical HUD,
+> communications and physical device integrations are **not implemented yet**; see
 > [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What it does today
@@ -50,15 +52,25 @@ and why.
 
 ```bash
 pip install -e ".[dev]"          # Python 3.11+; runtime dependencies: httpx, psutil
+```
 
-# with a local Ollama (https://ollama.com): ollama serve && ollama pull llama3.1:8b
-jarvis                            # interactive session
-jarvis doctor                     # self-diagnostics
-jarvis status                     # compact system status
+**With a real model** (recommended). Install [Ollama](https://ollama.com/download), then:
 
-# without any model or real monitoring: simulated metrics, network and model
+```bash
+ollama pull llama3.1:8b          # or llama3.2:3b on a computer without a graphics card
+jarvis                            # interactive session (Windows: py -m jarvis)
+jarvis doctor --live              # verify the whole chain against your Ollama
+```
+
+Step-by-step setup, model choice and troubleshooting: [docs/OLLAMA.md](docs/OLLAMA.md).
+
+**Without any model**, with simulated metrics, network and model:
+
+```bash
 jarvis --simulate
 ```
+
+Other commands: `jarvis doctor` (self-diagnostics), `jarvis status` (compact system status), `jarvis ask "..."`.
 
 Example session (simulation mode, in this repository):
 
@@ -140,3 +152,14 @@ specification: long-running work alongside conversation, unprompted failure dete
 resource adaptation, dependency loss, plan changes, restart recovery, "what are you doing?", "why did you do
 that?", stop and continue, delegated monitoring, authorization, lying tools, model outage, live-state answers,
 memory, decision history, sensitive projects and attention.
+
+`tests/integration/` runs against a real Ollama server and is opt-in:
+
+```bash
+pip install -e ".[integration]"
+JARVIS_OLLAMA_TESTS=1 python -m pytest tests/integration                       # any running Ollama
+JARVIS_OLLAMA_TESTS=1 JARVIS_TEST_MODEL=llama3.1:8b python -m pytest tests/integration   # plus a real model
+```
+
+The plumbing tests build tiny deterministic "puppet" models on the fly, so they need no model download. See
+[docs/OLLAMA.md](docs/OLLAMA.md#for-developers-live-integration-tests).

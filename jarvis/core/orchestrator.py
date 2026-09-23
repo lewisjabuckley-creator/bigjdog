@@ -30,6 +30,7 @@ from jarvis.events.types import Event, EventType
 from jarvis.log import get_logger
 from jarvis.memory.store import MemoryKind
 from jarvis.models.base import Capability, ChatMessage, ModelError, NoModelAvailable, Purpose, ToolCall
+from jarvis.models.ollama import strip_thinking
 from jarvis.models.router import TaskProfile
 from jarvis.notifications.manager import Notification
 from jarvis.permissions.hierarchy import InstructionSource
@@ -59,12 +60,17 @@ class Response:
     notifications: list[Notification] = field(default_factory=list)
     model: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
+    streamed: bool = False                 # the answer text was already shown token by token
+    footnote: str = ""                     # e.g. a model fallback note
 
-    def render(self) -> str:
-        out = self.text
-        if self.notifications:
-            out += "\n" + "\n".join(f"• {n.text()}" for n in self.notifications)
-        return out
+    def render(self, *, include_text: bool = True) -> str:
+        parts = []
+        if include_text:
+            parts.append(self.text + (f" ({self.footnote})" if self.footnote else ""))
+        elif self.footnote:
+            parts.append(f"({self.footnote})")
+        parts += [f"• {n.text()}" for n in self.notifications]
+        return "\n".join(p for p in parts if p)
 
 
 Handler = Callable[[Intent], Awaitable[Response]]
@@ -84,6 +90,7 @@ class Orchestrator:
         self.session_since: float = float(previous) if isinstance(previous, (int, float)) else svc.clock.now() - 86400
         self.last_changes_check: float | None = None
         self._inline_tasks: list[str] = []      # tasks whose outcome is reported in the current reply
+        self._token_sink: Callable[[str], None] | None = None
         self._register_internal_tools()
         self.handlers: dict[IntentKind, Handler] = {
             IntentKind.STATUS: self._status, IntentKind.REENTRY: self._reentry, IntentKind.BRIEFING: self._briefing,
@@ -105,12 +112,16 @@ class Orchestrator:
         }
 
     # -- entry point ------------------------------------------------------------------------
-    async def handle(self, text: str) -> Response:
+    async def handle(self, text: str, *, on_token: Callable[[str], None] | None = None) -> Response:
+        """Handle one user turn. ``on_token`` receives model answer text as it streams (interfaces may show it
+        live); deterministic answers are returned whole."""
         previous_activity = self.svc.notifications.user_activity
         self.svc.notifications.set_activity("conversing")
+        self._token_sink = on_token
         try:
             return await self._handle(text)
         finally:
+            self._token_sink = None
             self.svc.notifications.set_activity(previous_activity if previous_activity != "conversing" else "idle")
 
     async def _handle(self, text: str) -> Response:
@@ -269,8 +280,9 @@ class Orchestrator:
                 return self._ask(self._task_choice_question("report on", res.candidates), intent, res.candidates, "task")
             task = res.item  # type: ignore[assignment]
             if task is None:
-                return self._reply(f"I'm not tracking anything called '{intent.target}'. {reports.activity(svc)}",
-                                   intent, provenance=[Provenance(ProvenanceKind.DATABASE, "tasks")])
+                return await self._or_chat(intent, self._reply(
+                    f"I'm not tracking anything called '{intent.target}'. {reports.activity(svc)}",
+                    intent, provenance=[Provenance(ProvenanceKind.DATABASE, "tasks")]))
         elif task is None and intent.target:
             res = self.resolver.task(None)
             task = res.item  # type: ignore[assignment]
@@ -318,6 +330,9 @@ class Orchestrator:
                 task = res.item  # type: ignore[assignment]
                 if task is None:
                     chain_text = self._dependency_chain(target)
+                    if not chain_text and intent.text.lower().lstrip().startswith("what happened"):
+                        return await self._or_chat(intent, self._reply(
+                            f"I have no record of anything called '{target}'.", intent))
             else:
                 focused = self.resolver.task(None, prefer=[S.FAILED, S.BLOCKED, S.WAITING],
                                              statuses=None).item
@@ -407,8 +422,12 @@ class Orchestrator:
             if task is None and res.ambiguous and not is_pronoun(intent.target):
                 return self._ask(self._task_choice_question(verb, res.candidates), intent, res.candidates, "task")
             if task is None:
-                return self._reply("Nothing is running." if is_pronoun(intent.target)
-                                   else f"I couldn't find a running task matching '{intent.target}'.", intent)
+                if is_pronoun(intent.target):
+                    return self._reply("Nothing is running.", intent)
+                if not svc.tasks.find(intent.target or ""):
+                    return await self._or_chat(intent, self._reply(
+                        f"I couldn't find a running task matching '{intent.target}'.", intent))
+                return self._reply(f"I couldn't find a running task matching '{intent.target}'.", intent)
         if hard:
             result = svc.tasks.cancel_task(task.id, by=svc.user, reason="cancelled by you")
         else:
@@ -1008,9 +1027,10 @@ class Orchestrator:
                     project = svc.projects.discover(expanded)
                 else:
                     known = ", ".join(p.name for p in svc.projects.list()[:6])
-                    return self._reply(f"I don't know a project called '{target}'."
-                                       + (f" Known projects: {known}." if known else " Give me its folder and I'll "
-                                          "register it."), intent)
+                    return await self._or_chat(intent, self._reply(
+                        f"I don't know a project called '{target}'."
+                        + (f" Known projects: {known}." if known else " Give me its folder and I'll register it."),
+                        intent))
         ctx = svc.projects.open(project)
         self.focus.touch_project(project.id)
         facts = []
@@ -1132,6 +1152,17 @@ class Orchestrator:
         local_only = bool(self.svc.state.value("models.prefer_local")) or self.svc.modes.effective().local_only
         return TaskProfile(purpose=purpose, complexity=complexity, needs_tools=tools, local_only=local_only)
 
+    def _chat_tools(self, profile: TaskProfile) -> list[dict[str, Any]]:
+        """Tool definitions offered to the model. Fewer, relevant tools make small local models far more reliable."""
+        svc = self.svc
+        exclude = set()
+        if not svc.devices.list():
+            exclude.add("device_command")
+        if profile.complexity != "high":
+            exclude.add("delegate_to_agent")
+        names = [t.spec.name for t in svc.registry.list() if t.spec.name not in exclude]
+        return svc.registry.model_schemas(names)
+
     async def _chat(self, intent: Intent) -> Response:
         svc = self.svc
         text = intent.text
@@ -1150,32 +1181,34 @@ class Orchestrator:
         assembled = await self.context.build(text, self.history[:-1])
         messages = assembled.messages
         provs = list(assembled.provenance)
-        tool_schemas = svc.registry.model_schemas()
         profile = self._profile(text, tools=True)
         try:
             svc.router.select(profile)
+            tool_schemas = self._chat_tools(profile)
         except NoModelAvailable:
-            profile = self._profile(text, tools=False)
+            profile = self._profile(text, tools=False)   # no tool-capable model: talk, but can't act
             tool_schemas = []
         ctx = ToolContext(actor=Actor.user(svc.user), cwd=self._work_root(), dry_run=intent.dry_run, clock=svc.clock,
                           data_dir=str(svc.config.data_path))
         model_name = None
         notes: list[str] = []
+        streamed_any = False
         for _round in range(_MAX_TOOL_ROUNDS):
             try:
-                routed = await svc.router.chat(profile, messages, tools=tool_schemas or None)
+                response, note, streamed = await self._model_round(profile, messages, tool_schemas or None,
+                                                                   separator=streamed_any)
             except ModelError as exc:
                 return self._reply(f"The model call failed: {exc}. Nothing was changed.", intent, kind="error")
-            model_name = routed.response.model
-            if routed.fallback_note and routed.fallback_note not in notes:
-                notes.append(routed.fallback_note)
-            calls = routed.response.tool_calls
+            streamed_any = streamed_any or streamed
+            model_name = response.model
+            if note and note not in notes:
+                notes.append(note)
+            calls = response.tool_calls
             if not calls:
-                answer = personality.clean(routed.response.content) or "Done."
-                if notes:
-                    answer += f" (Note: {'; '.join(notes)}.)"
-                return self._reply(answer, intent, provenance=provs, model=model_name)
-            messages.append(ChatMessage("assistant", routed.response.content, tool_calls=calls))
+                answer = personality.clean(strip_thinking(response.content)) or "Done."
+                return Response(answer, intent.kind, provenance=provs, model=model_name, streamed=streamed_any,
+                                footnote=f"Note: {'; '.join(notes)}" if notes else "")
+            messages.append(ChatMessage("assistant", response.content, tool_calls=calls))
             for call in calls:
                 outcome = await self._execute_model_tool(call, ctx, text)
                 if isinstance(outcome, Response):
@@ -1188,11 +1221,63 @@ class Orchestrator:
         return self._reply("I stopped after several tool steps without reaching an answer. Here's where things stand: "
                            + reports.activity(svc), intent, provenance=provs, model=model_name)
 
+    async def _model_round(self, profile: TaskProfile, messages: list[ChatMessage],
+                           tools: list[dict[str, Any]] | None, *, separator: bool = False) -> tuple[Any, str | None, bool]:
+        """One model call. Streams answer text to the interface when it asked for tokens; otherwise (or if
+        streaming fails before anything was shown) uses the router's fallback-capable call."""
+        sink = self._token_sink
+        if sink is None:
+            routed = await self.svc.router.chat(profile, messages, tools=tools)
+            return routed.response, routed.fallback_note, False
+        cleaner = _StreamCleaner(sink, prefix=" " if separator else "")
+        final = None
+        try:
+            async for chunk in self.svc.router.stream(profile, messages, tools=tools):
+                if chunk.delta:
+                    cleaner.feed(chunk.delta)
+                if chunk.done:
+                    final = chunk.response
+        except ModelError:
+            if cleaner.emitted:
+                raise
+            routed = await self.svc.router.chat(profile, messages, tools=tools)
+            return routed.response, routed.fallback_note, False
+        cleaner.close()
+        if final is None:
+            raise ModelError("the model stream ended without a final message")
+        return final, None, cleaner.emitted
+
+    def _clean_args(self, call: ToolCall) -> dict[str, Any]:
+        """Small models often add stray arguments or send JSON as a string: keep only what the tool declares."""
+        args: Any = call.arguments
+        if isinstance(args, dict) and set(args) == {"_raw"} and isinstance(args["_raw"], str):
+            try:
+                args = json.loads(args["_raw"])
+            except ValueError:
+                args = {}
+        if not isinstance(args, dict):
+            return {}
+        tool = self.svc.registry.get(call.name)
+        if tool is None or tool.spec.parameters.get("additionalProperties"):
+            return dict(args)
+        known = tool.spec.parameters.get("properties", {})
+        return {k: v for k, v in args.items() if k in known and v is not None}
+
+    async def _or_chat(self, intent: Intent, deterministic: Response) -> Response:
+        """The grammar matched but its target means nothing to the task system ("how's the weather?"):
+        let the model handle it when one is available."""
+        if self.svc.router.available():
+            reply = await self._chat(Intent(IntentKind.CHAT, intent.text, dry_run=intent.dry_run, source="model"))
+            if reply.kind != "error":
+                return reply
+        return deterministic       # no model (or it just failed): the deterministic answer still stands
+
     async def _execute_model_tool(self, call: ToolCall, ctx: ToolContext,
                                   user_text: str) -> tuple[dict[str, Any], Provenance | None] | Response:
         svc = self.svc
         reason = OperationalReason("you asked: " + user_text[:120], "act on explicit user requests",
                                    f"ran {call.name}")
+        call = ToolCall(call.name, self._clean_args(call), call.id)
         tool = svc.registry.get(call.name)
         long_running = bool(tool and tool.spec.long_running)
         if long_running and not ctx.dry_run:
@@ -1261,3 +1346,60 @@ def _rebase(args: dict[str, Any], old_root: str | None, new_root: str | None) ->
 def _attrs_brief(attrs: dict[str, Any]) -> str:
     items = [f"{k} {v}" for k, v in attrs.items() if isinstance(v, (int, float, str, bool)) and k != "root"][:2]
     return ", ".join(items)
+
+
+class _StreamCleaner:
+    """Filters streamed model text before it reaches the interface: drops inline reasoning traces
+    (<think>…</think>) and holds back the first few words so chatbot filler openers can be removed."""
+
+    _HOLD = 40
+
+    def __init__(self, sink: Callable[[str], None], prefix: str = "") -> None:
+        self.sink = sink
+        self.prefix = prefix
+        self.buffer = ""
+        self.started = False
+        self.in_think = False
+        self.emitted = False
+
+    def feed(self, delta: str) -> None:
+        text = delta
+        out = ""
+        while text:
+            if self.in_think:
+                end = text.lower().find("</think>")
+                if end < 0:
+                    return
+                text = text[end + len("</think>"):]
+                self.in_think = False
+            else:
+                start = text.lower().find("<think>")
+                if start < 0:
+                    out += text
+                    break
+                out += text[:start]
+                text = text[start + len("<think>"):]
+                self.in_think = True
+        if not out:
+            return
+        if self.started:
+            self._emit(out)
+            return
+        self.buffer += out
+        if len(self.buffer) >= self._HOLD:
+            self._flush_start()
+
+    def _flush_start(self) -> None:
+        self.started = True
+        text = personality.strip_opener(self.buffer.lstrip())
+        self.buffer = ""
+        if text:
+            self._emit(self.prefix + text)
+
+    def _emit(self, text: str) -> None:
+        self.emitted = True
+        self.sink(text)
+
+    def close(self) -> None:
+        if not self.started and self.buffer.strip():
+            self._flush_start()

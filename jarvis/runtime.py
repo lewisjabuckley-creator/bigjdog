@@ -34,6 +34,8 @@ from jarvis.memory.store import MemoryStore
 from jarvis.models.base import ModelProvider
 from jarvis.models.ollama import OllamaProvider
 from jarvis.models.openai_compat import OpenAICompatibleProvider
+from jarvis.models.readiness import ModelReadiness
+from jarvis.models.readiness import assess as assess_models
 from jarvis.models.router import ModelRouter
 from jarvis.monitoring.metrics import MetricsSource, PsutilMetrics
 from jarvis.monitoring.service import (ModelMonitor, MonitoringService, NetworkMonitor, NetworkProbe, SelfMonitor,
@@ -66,11 +68,18 @@ class StartupReport:
     recovered: list[RecoveryReport] = field(default_factory=list)
     models: list[str] = field(default_factory=list)
     duration_s: float = 0.0
+    readiness: ModelReadiness | None = None
 
     def greeting(self) -> str:
         parts = ["Ready."]
-        if not self.models:
-            parts.append("No language model is reachable, so I'm running on deterministic capabilities only.")
+        r = self.readiness
+        if r is not None and r.can_converse:
+            parts.append(f"Talking through {r.summary()}.")
+        else:
+            parts.append("No language model is available, so I'm running on deterministic capabilities only "
+                         "(status, tasks, monitoring, memory, commands).")
+        if r is not None:
+            parts += r.issues[:2]
         interrupted = [r for r in self.recovered if not r.resumed]
         resumed = [r for r in self.recovered if r.resumed]
         if interrupted:
@@ -188,8 +197,11 @@ class Runtime:
         cfg = self.config.models
         providers: list[ModelProvider] = []
         if cfg.ollama.enabled:
+            options: dict[str, Any] = {"num_ctx": cfg.ollama.num_ctx}
+            options.update({k: (int(v) if k in ("seed", "num_ctx", "num_predict", "top_k") else v)
+                            for k, v in cfg.ollama.options.items()})
             providers.append(OllamaProvider(cfg.ollama.base_url, keep_alive=cfg.ollama.keep_alive,
-                                            timeout=cfg.ollama.request_timeout_s))
+                                            timeout=cfg.ollama.request_timeout_s, default_options=options))
         oc = cfg.openai_compatible
         if oc.enabled and oc.base_url:
             key = SecretStore().get(oc.api_key_env) if oc.api_key_env else None
@@ -223,6 +235,9 @@ class Runtime:
             report.models = [m.name for m in inventory]
         except Exception as exc:
             report.issues.append(f"Model discovery failed: {exc}.")
+        ollama_url = self.config.models.ollama.base_url if self.config.models.ollama.enabled else None
+        report.readiness = assess_models(svc.router, ollama_url)
+        svc.extra["model_readiness"] = report.readiness
         await svc.pool.start()
         use_monitoring = self.config.monitoring.enabled if monitoring is None else monitoring
         system = SystemMonitor(svc.metrics, svc.state, self.config.monitoring, bus=svc.bus, clock=svc.clock,

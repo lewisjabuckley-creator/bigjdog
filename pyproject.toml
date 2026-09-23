@@ -16,6 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# builds the deterministic "puppet" models used by the live Ollama integration tests
+integration = ["pytest>=8", "gguf>=0.10", "numpy>=1.24"]
 
 [project.scripts]
 jarvis = "jarvis.cli:main"
@@ -25,4 +27,8 @@ include = ["jarvis*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"
+markers = [
+    "ollama: live tests against a real Ollama server (opt-in: set JARVIS_OLLAMA_TESTS=1)",
+]

@@ -9,8 +9,10 @@ this module knows it is talking to Ollama.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 
@@ -23,13 +25,16 @@ class OllamaProvider(ModelProvider):
 
     def __init__(self, base_url: str = "http://127.0.0.1:11434", *, keep_alive: str = "5m",
                  timeout: float = 300.0, transport: httpx.AsyncBaseTransport | None = None,
-                 name: str = "ollama") -> None:
+                 name: str = "ollama", default_options: dict[str, Any] | None = None) -> None:
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.keep_alive = keep_alive
         self.timeout = timeout
+        self.default_options = dict(default_options or {})
+        # A local Ollama must never be reached through a system HTTP proxy (corporate proxies break it).
+        loopback = urlparse(self.base_url).hostname in ("localhost", "127.0.0.1", "::1")
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=httpx.Timeout(timeout, connect=3.0),
-                                         transport=transport)
+                                         transport=transport, trust_env=not loopback)
         self._show_cache: dict[str, dict[str, Any]] = {}
 
     # -- helpers ------------------------------------------------------------------
@@ -106,8 +111,9 @@ class OllamaProvider(ModelProvider):
                                 "keep_alive": self.keep_alive}
         if tools:
             body["tools"] = tools
-        if options:
-            body["options"] = options
+        merged = {**self.default_options, **(options or {})}
+        if merged:
+            body["options"] = merged
         if format is not None:
             body["format"] = format
         return body
@@ -217,9 +223,14 @@ def _to_ollama(m: ChatMessage) -> dict[str, Any]:
     if m.images:
         out["images"] = m.images
     if m.tool_calls:
-        out["tool_calls"] = [{"function": {"name": c.name, "arguments": c.arguments}} for c in m.tool_calls]
-    if m.role == "tool" and m.name:
-        out["tool_name"] = m.name
+        out["tool_calls"] = [{**({"id": c.id} if c.id else {}),
+                              "function": {"index": i, "name": c.name, "arguments": c.arguments}}
+                             for i, c in enumerate(m.tool_calls)]
+    if m.role == "tool":
+        if m.name:
+            out["tool_name"] = m.name
+        if m.tool_call_id:
+            out["tool_call_id"] = m.tool_call_id
     return out
 
 
@@ -237,9 +248,18 @@ def _tool_calls(msg: dict[str, Any]) -> list[ToolCall]:
     return calls
 
 
+_THINK = re.compile(r"<think>.*?(</think>|$)", re.DOTALL | re.IGNORECASE)
+
+
+def strip_thinking(text: str) -> str:
+    """Remove reasoning traces some models emit inline (newer Ollama returns them separately)."""
+    return _THINK.sub("", text).strip() if "<think" in text.lower() else text
+
+
 def _from_ollama(data: dict[str, Any], model: str, provider: str, latency: float) -> ChatResponse:
     msg = data.get("message") or {}
-    return ChatResponse(content=msg.get("content") or "", model=data.get("model") or model, provider=provider,
+    return ChatResponse(content=strip_thinking(msg.get("content") or ""), model=data.get("model") or model,
+                        provider=provider,
                         tool_calls=_tool_calls(msg), prompt_tokens=data.get("prompt_eval_count"),
                         completion_tokens=data.get("eval_count"), latency_s=round(latency, 3),
                         done_reason=data.get("done_reason"))

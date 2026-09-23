@@ -201,6 +201,7 @@ def normalise(text: str) -> str:
     text = text.strip()
     text = _PREFIX.sub("", text, count=1)
     text = _SUFFIX.sub("", text)
+    text = re.sub(r"\s+for (me|us)$", "", text, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", text).strip()
 
 

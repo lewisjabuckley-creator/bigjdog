@@ -37,6 +37,11 @@ class OllamaConfig:
     base_url: str = "http://127.0.0.1:11434"
     keep_alive: str = "5m"
     request_timeout_s: float = 300.0
+    # Context window requested from Ollama. Its default is small; the system prompt, live state, memory and
+    # tool definitions need room, and Ollama silently drops the start of an over-long prompt.
+    num_ctx: int = 8192
+    # Extra sampling options passed to every request, e.g. {temperature = 0.2, seed = 7}.
+    options: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

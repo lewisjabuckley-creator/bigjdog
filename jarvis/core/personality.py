@@ -53,12 +53,17 @@ def system_prompt(*, verbosity: str = "normal", humor: bool = True, use_sir: boo
     return "\n".join(lines)
 
 
+def strip_opener(text: str) -> str:
+    """Remove a leading filler opener ("Certainly!", "Absolutely,")."""
+    stripped = _FILLER_OPENERS.sub("", text, count=1)
+    if stripped != text and stripped and stripped[0].islower():
+        stripped = stripped[0].upper() + stripped[1:]
+    return stripped
+
+
 def clean(text: str) -> str:
     """Strip filler that makes responses sound like a chatbot."""
-    text = text.strip()
-    text = _FILLER_OPENERS.sub("", text, count=1)
-    if text and text[0].islower():
-        text = text[0].upper() + text[1:]
+    text = strip_opener(text.strip())
     text = _FILLER_CLOSERS.sub("", text)
     return text.strip()
 

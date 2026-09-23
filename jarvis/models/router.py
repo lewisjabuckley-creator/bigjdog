@@ -271,6 +271,10 @@ class ModelRouter:
         provider = self.providers[decision.provider]
         try:
             async for chunk in provider.stream_chat(decision.model, messages, tools=tools):
+                if chunk.done and chunk.response is not None:
+                    self.calls += 1
+                    self.tokens["prompt"] += chunk.response.prompt_tokens or 0
+                    self.tokens["completion"] += chunk.response.completion_tokens or 0
                 yield chunk
             self._record_success(decision.provider, decision.model)
         except ModelError as exc:

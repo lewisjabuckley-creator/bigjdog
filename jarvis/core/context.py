@@ -107,7 +107,9 @@ class ContextAssembler:
         if len(text) > self.max_chars:
             text = text[: self.max_chars] + "\n…[context truncated]"
         messages = [ChatMessage("system", text)]
-        messages += history[-self.history_turns:]
+        for past in history[-self.history_turns:]:
+            content = past.content if len(past.content) <= 2000 else past.content[:2000] + "…"
+            messages.append(ChatMessage(past.role, content))
         messages.append(ChatMessage("user", user_text))
         return AssembledContext(messages, provs, memory_ids)
 

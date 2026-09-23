@@ -5,7 +5,7 @@ covered by tests. "Partial" means the architecture and a working subset exist.
 
 | Phase | Status | Notes |
 |---|---|---|
-| 1. Foundation (Ollama adapter, model abstraction, conversation, config, SQLite, logging) | **Done** | Ollama adapter tested against a mock server. The OpenAI-compatible adapter is optional. |
+| 1. Foundation (Ollama adapter, model abstraction, conversation, config, SQLite, logging) | **Done** | Real conversations through Ollama: streaming, tool use, approvals, memory in context. Verified against a real Ollama server (built from source) with deterministic puppet models. Not yet exercised here with a real instruction-tuned model (downloads blocked in the build environment); `jarvis doctor --live` and `JARVIS_TEST_MODEL` cover that on a user's machine. |
 | 2. Tools (filesystem, shell, process, system info, projects) | **Done** | Risk-classified shell, reversible writes, trash-based delete, project isolation. |
 | 3. State (state engine, world model, event bus, monitoring) | **Done** | System, network, model and self monitors; thresholds, trends, predictions. |
 | 4. Tasks (manager, workers, checkpoints, cancellation, scheduling) | **Done** | State machine, recovery, dependencies, throttling, deadlines, schedules and rules. |
@@ -42,7 +42,8 @@ covered by tests. "Partial" means the architecture and a working subset exist.
     between the deterministic grammar and open chat.
 11. **Physical devices.** Real `Device` adapters (Home Assistant, MQTT, serial or microcontrollers,
     OctoPrint) behind the telemetry-first contract.
-12. **CI.** Run the test suite on every push; add type checking.
+12. **CI.** Run the test suite on every push, plus the live Ollama tests with puppet models (they need no model
+    download); add type checking.
 
 ## Known limitations
 

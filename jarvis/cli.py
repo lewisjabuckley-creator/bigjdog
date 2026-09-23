@@ -106,12 +106,29 @@ async def interactive(args: argparse.Namespace) -> int:
                 print(await slash(line, runtime, sim))
                 continue
             svc.notifications.set_activity("typing")
+            streaming = {"started": False}
+
+            def on_token(text: str) -> None:
+                if not streaming["started"]:
+                    streaming["started"] = True
+                    print("\r" + " " * 14 + "\rjarvis › ", end="", flush=True)
+                print(text, end="", flush=True)
+
+            print("jarvis › …", end="", flush=True)
             try:
-                response = await orch.handle(line)
+                response = await orch.handle(line, on_token=on_token)
             except Exception as exc:  # never let the interface die on one bad turn
-                print(f"jarvis › internal error: {exc}")
+                print(f"\rjarvis › internal error: {exc}")
                 continue
-            print(f"jarvis › {response.render()}")
+            if response.streamed:
+                print()
+                extra = response.render(include_text=False)
+                if extra:
+                    print(extra)
+            elif streaming["started"]:        # some text streamed, then e.g. an approval question
+                print(f"\njarvis › {response.render()}")
+            else:
+                print("\r" + " " * 14 + f"\rjarvis › {response.render()}")
     finally:
         drainer.cancel()
         svc.notifications.sinks.remove(sink)
@@ -253,8 +270,42 @@ async def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"issue: {issue}")
         for comp in svc.health.components.values():
             print(f"subsystem {comp.name}: {comp.status.label} {comp.detail}")
+        readiness = report.readiness
+        if readiness is not None:
+            print(f"conversation model: {readiness.summary()}")
+            print(f"embedding model: {readiness.embedding_model or 'none'}")
+            for issue in readiness.issues:
+                print(f"model issue: {issue}")
+            for tip in readiness.tips:
+                print(f"tip: {tip}")
         return 0
-    return await _with_runtime(args, run)
+    code = await _with_runtime(args, run)
+    if getattr(args, "live", False):
+        code = max(code, await live_doctor(args))
+    return code
+
+
+async def live_doctor(args: argparse.Namespace) -> int:
+    """End-to-end checks against the real model runtime, in a throwaway data directory."""
+    from jarvis.diagnostics import live_checks
+    if args.simulate:
+        print("\nlive checks need a real model runtime; run without --simulate")
+        return 1
+    cfg = load_config(args.config)
+    print("\nLive checks (temporary data directory; your real memory and tasks are not touched).")
+    print("On a computer without a graphics card each step can take a minute.\n")
+    results = await live_checks(cfg, model=args.model, report=lambda r: print(r.line(), flush=True))
+    failed = [r for r in results if r.status == "FAIL"]
+    warned = [r for r in results if r.status == "WARN"]
+    if failed:
+        print(f"\n{len(failed)} check(s) failed — see above.")
+        return 1
+    if warned:
+        print(f"\nWorking, but the model didn't follow {len(warned)} instruction(s). Larger or tool-tuned models "
+              "(e.g. qwen2.5:7b, llama3.1:8b) do better.")
+    else:
+        print("\nAll live checks passed: you can have a real conversation with JARVIS.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -270,7 +321,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="compact system status")
     tasks = sub.add_parser("tasks", help="list tasks")
     tasks.add_argument("--all", action="store_true")
-    sub.add_parser("doctor", help="self-diagnostics")
+    doctor = sub.add_parser("doctor", help="self-diagnostics")
+    doctor.add_argument("--live", action="store_true",
+                        help="also run end-to-end checks against the real model runtime (Ollama)")
+    doctor.add_argument("--model", help="model to use for --live checks (default: JARVIS's choice)")
     sub.add_parser("models", help="installed models")
     events = sub.add_parser("events", help="recent events")
     events.add_argument("--limit", type=int, default=20)

@@ -89,3 +89,25 @@ startup with a clear message. Secrets are referenced by environment variable nam
 **Why:** spec §36, §122 and §173-175. Tool results carry provenance, verification is recorded separately from
 execution, partial outcomes stay partial, simulated components label themselves, and "What are you?" lists what
 is *not* implemented.
+
+### D17. Live integration tests use deterministic "puppet" models
+**Why:** tests against a real LLM are slow, need multi-gigabyte downloads and are non-deterministic, so they
+can't assert exact behaviour. A puppet is a tiny GGUF whose hand-set weights turn it into a lookup table: it emits
+scripted replies (including tool calls in the format its template declares) through the real Ollama server. This
+verifies the real contract (template rendering with tools, llama.cpp inference, Ollama's tool-call parsing,
+streaming, lifecycle, error classes) exactly, with no download. Model *quality* is checked separately with
+`JARVIS_TEST_MODEL` and `jarvis doctor --live`, which report a model that doesn't follow instructions as WARN,
+not FAIL.
+
+### D18. The grammar goes first; the model catches its misfires
+**Why:** the deterministic grammar must stay instant and model-independent (D5), but patterns like "how's the X?"
+or "open the X" also match ordinary conversation. When the matched target resolves to nothing JARVIS tracks and a
+model is available, the request goes to the model; otherwise the deterministic answer stands. Control words
+("stop", "continue", "proceed") never fall through while there is something they can act on.
+
+### D19. Small-model hygiene is JARVIS's job
+**Why:** local 3-8B models are the target, and they are less precise than cloud models. JARVIS therefore offers
+only relevant tools, drops arguments the tool doesn't declare, requests an adequate context window, strips
+reasoning traces, keeps each history message bounded, and feeds honest tool failures back so the model can
+recover. The model is never given authority: every call still goes through the registry, permissions and
+verification.

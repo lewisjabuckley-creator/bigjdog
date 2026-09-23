@@ -15,6 +15,8 @@ enabled = true
 base_url = "http://127.0.0.1:11434"
 keep_alive = "5m"
 request_timeout_s = 300
+num_ctx = 8192                  # context window requested from Ollama (its default is too small for JARVIS)
+options = {}                    # extra sampling options, e.g. { temperature = 0.3, seed = 7 }
 
 # Optional: any OpenAI-compatible endpoint (llama.cpp server, vLLM, LM Studio, or a cloud API).
 [models.openai_compatible]
