@@ -118,74 +118,90 @@ async def live_checks(config: JarvisConfig, *, model: str | None = None, level: 
         if level == "contract":
             return results
 
+        # everything below happens inside the temporary folder, opened as a project
+        svc.projects.open(svc.projects.discover(str(workdir), name="jarvis-live-check"))
         orch = runtime.orchestrator()
-
-        # natural language → tool registry → verified result
-        t = time.monotonic()
-        before = len(svc.audit.query(action="tool_execute", limit=500))
-        reply = await orch.handle("Use your system_info tool to check this computer's current memory usage, "
-                                  "then tell me the percentage.")
-        runs = svc.audit.query(action="tool_execute", limit=500)
-        new_runs = runs[: len(runs) - before]
-        used = [e for e in new_runs if e.actor == f"user:{svc.user}"]
-        if used:
-            record("request reaches tools", "PASS", f"ran {', '.join(sorted({e.tool for e in used}))}; "
-                                                    f"replied {reply.text[:80]!r}", t)
-        else:
-            record("request reaches tools", "WARN", f"the model answered without calling a tool: {reply.text[:100]!r}", t)
-
-        # file creation through a tool, verified on disk
-        t = time.monotonic()
-        target = workdir / "hello.txt"
-        reply = await orch.handle(f"Create a file at {target} containing exactly this text: hi from jarvis")
-        await _settle(svc)
-        if target.exists() and "hi from jarvis" in target.read_text(errors="replace"):
-            writes = [e for e in svc.audit.query(action="tool_execute", limit=50) if e.tool == "file_write"]
-            verified = bool(writes and writes[0].verification and writes[0].verification.get("passed"))
-            record("file write verified", "PASS", "file created" + (" and read back" if verified else ""), t)
-        else:
-            record("file write verified", "WARN", f"no file was written: {reply.text[:100]!r}", t)
-
-        # memory → model context
-        t = time.monotonic()
-        await orch.handle("Remember that the diagnostic code word is aubergine")
-        reply = await orch.handle("What is the diagnostic code word? Answer with just the word.")
-        record("memory reaches the model", "PASS" if "aubergine" in reply.text.lower() else "WARN",
-               f"replied {reply.text[:80]!r}", t)
-
-        # consequential action stops for approval; declining leaves the file alone
-        t = time.monotonic()
-        probe = workdir / "keep-me.txt"
-        probe.write_text("do not delete")
-        reply = await orch.handle(f"Delete the file {probe}")
-        if reply.kind == "question" and "approval" in reply.text.lower():
-            declined = await orch.handle("no")
-            await _settle(svc)
-            status = "PASS" if probe.exists() else "FAIL"
-            record("approval gate", status, "deletion paused for approval; declined; file kept"
-                   if probe.exists() else f"file deleted despite declining ({declined.text[:60]!r})", t)
-        elif not probe.exists():
-            record("approval gate", "FAIL", "the file was deleted without approval", t)
-        else:
-            record("approval gate", "WARN", f"the model didn't attempt the deletion: {reply.text[:100]!r}", t)
-
-        # background work becomes a durable task
-        t = time.monotonic()
-        before_tasks = {task.id for task in svc.tasks.list_tasks(limit=500)}
-        reply = await orch.handle("Run the shell command `echo jarvis-live-check` as a background task.")
-        await _settle(svc)
-        created = [task for task in svc.tasks.list_tasks(limit=500) if task.id not in before_tasks
-                   and any(s.tool == "shell_execute" for s in task.plan)]
-        if created:
-            task = await svc.pool.wait_for(created[0].id, timeout=60)
-            ok = task.status == TaskStatus.COMPLETED
-            record("background task", "PASS" if ok else "WARN",
-                   f"task {task.id} {task.status.value}: {task.outputs.get('summary', '')}"[:120], t)
-        else:
-            record("background task", "WARN", f"no task was created: {reply.text[:100]!r}", t)
+        for name, check in (("request reaches tools", _check_tools), ("file write verified", _check_file_write),
+                            ("memory reaches the model", _check_memory), ("approval gate", _check_approval),
+                            ("background task", _check_background)):
+            t = time.monotonic()
+            try:
+                status, detail = await check(svc, orch, workdir)
+            except Exception as exc:   # a check must report, never crash the doctor
+                status, detail = "FAIL", f"{type(exc).__name__}: {exc}"
+            record(name, status, detail, t)
         return results
     finally:
         await runtime.stop()
+
+
+async def _check_tools(svc, orch, workdir: Path) -> tuple[str, str]:
+    """Natural language → tool registry → result back to the model."""
+    before = {e.id for e in svc.audit.query(action="tool_execute", limit=500)}
+    reply = await orch.handle("Use your system_info tool to check this computer's current memory usage, "
+                              "then tell me the percentage.")
+    used = [e for e in svc.audit.query(action="tool_execute", limit=500)
+            if e.id not in before and e.actor == f"user:{svc.user}"]
+    if used:
+        return "PASS", f"ran {', '.join(sorted({e.tool for e in used}))}; replied {reply.text[:80]!r}"
+    return "WARN", f"the model answered without calling a tool: {reply.text[:100]!r}"
+
+
+async def _check_file_write(svc, orch, workdir: Path) -> tuple[str, str]:
+    target = workdir / "hello.txt"
+    reply = await orch.handle(f"Create a file at {target} containing exactly this text: hi from jarvis")
+    await _settle(svc)
+    if target.exists() and "hi from jarvis" in target.read_text(errors="replace"):
+        writes = [e for e in svc.audit.query(action="tool_execute", limit=50) if e.tool == "file_write"]
+        verified = bool(writes and writes[0].verification and writes[0].verification.get("passed"))
+        return "PASS", "file created" + (" and read back" if verified else "")
+    return "WARN", f"no file was written: {reply.text[:100]!r}"
+
+
+async def _check_memory(svc, orch, workdir: Path) -> tuple[str, str]:
+    await orch.handle("Remember that the diagnostic code word is aubergine")
+    reply = await orch.handle("What is the diagnostic code word? Answer with just the word.")
+    return ("PASS" if "aubergine" in reply.text.lower() else "WARN"), f"replied {reply.text[:80]!r}"
+
+
+async def _check_approval(svc, orch, workdir: Path) -> tuple[str, str]:
+    """A consequential action stops for approval; declining leaves the file alone."""
+    probe = workdir / "keep-me.txt"
+    probe.write_text("do not delete")
+    reply = await orch.handle(f"Delete the file {probe}")
+    if reply.kind == "question" and "approval" in reply.text.lower():
+        declined = await orch.handle("no")
+        await _settle(svc)
+        if probe.exists():
+            return "PASS", "deletion paused for approval; declined; file kept"
+        return "FAIL", f"file deleted despite declining ({declined.text[:60]!r})"
+    await _settle(svc)
+    if not probe.exists():
+        return "FAIL", "the file was deleted without approval"
+    return "WARN", f"the model didn't attempt the deletion: {reply.text[:100]!r}"
+
+
+async def _check_background(svc, orch, workdir: Path) -> tuple[str, str]:
+    """Background work becomes a durable task that finishes."""
+    before = {task.id for task in svc.tasks.list_tasks(limit=500)}
+    reply = await orch.handle("Run the shell command `echo jarvis-live-check` as a background task.")
+    await _settle(svc)
+    created = [task for task in svc.tasks.list_tasks(limit=500)
+               if task.id not in before and any(s.tool == "shell_execute" for s in task.plan)]
+    if not created:
+        return "WARN", f"no task was created: {reply.text[:100]!r}"
+    settled = (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED,
+               TaskStatus.WAITING)
+    try:
+        task = await svc.pool.wait_for(created[0].id, settled, timeout=120)
+    except TimeoutError:
+        return "WARN", "the task is still running after 2 minutes"
+    command = next((s.args.get("command") for s in task.plan if s.tool == "shell_execute"), "?")
+    if task.status == TaskStatus.COMPLETED:
+        return "PASS", f"task ran `{command}` and completed"
+    if task.status == TaskStatus.WAITING:
+        return "WARN", f"the model chose `{command}`, which needs your approval ({task.status_reason})"
+    return "FAIL", f"task {task.status.value}: {task.status_reason or task.outputs.get('summary', '')}"[:160]
 
 
 async def _settle(svc: object, timeout: float = 30.0) -> None:

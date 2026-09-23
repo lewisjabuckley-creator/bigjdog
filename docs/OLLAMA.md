@@ -103,6 +103,7 @@ In a conversation: "use the qwen2.5:7b model", "use the local model", "which mod
 | "... can't call tools" | Pull a tool-capable model (`qwen2.5:7b`), or pin one: "use the qwen2.5:7b model". |
 | Answers are very slow | Normal on CPU: use a 3B model, close other heavy apps, or set `num_ctx = 4096`. |
 | The model ignores tools and just talks | Try `qwen2.5:7b`; small models follow tool instructions less reliably. `jarvis doctor --live` shows which steps work. |
+| Where do commands and relative paths run? | In the open project's folder; with no project open, in the folder you started JARVIS from if it's allowed, otherwise your home folder. |
 | JARVIS says a path is "outside the allowed roots" | Open the folder as a project first (`open the project D:\my\folder`), or add it to `permissions.allowed_roots`. |
 
 ## For developers: live integration tests

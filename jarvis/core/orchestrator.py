@@ -231,9 +231,19 @@ class Orchestrator:
         return f"Which one should I {verb}? {options}"
 
     def _work_root(self) -> str:
+        """Where relative paths and commands point: the active project, else the folder JARVIS was started
+        from if it is inside the allowed scope, else the user's home folder (allowed by default), else the
+        first allowed folder."""
         project = self.svc.projects.active()
         if project and project.root:
             return project.root
+        paths = self.svc.permissions.paths
+        for candidate in (os.getcwd(), os.path.expanduser("~")):
+            if paths.check(os.path.realpath(candidate))[0]:
+                return candidate
+        for root in paths.roots():                     # otherwise the first allowed folder that exists
+            if os.path.isdir(root) and paths.check(root)[0]:
+                return root
         return os.getcwd()
 
     def _project_for(self, target: str | None) -> tuple[Project | None, list[Project]]:
@@ -1135,7 +1145,7 @@ class Orchestrator:
             if rejected and not validated:
                 return {"error": f"invalid steps: {'; '.join(rejected[:3])}"}
             planner_steps = validated
-        task = self._user_task(objective, steps=planner_steps or None, priority=priority)
+        task = self._user_task(objective, steps=planner_steps or None, priority=priority, cwd=self._work_root())
         if not notify:
             task.policy.notify_on = ["failed"]
             self.svc.tasks.save(task)
@@ -1284,7 +1294,8 @@ class Orchestrator:
             # durable + interruptible: run it as a task and wait briefly
             task = self._user_task(f"{call.name} for: {user_text[:80]}", title=f"{call.name}: {user_text[:50]}",
                                    steps=[Step(tool.preview(call.arguments) if tool else call.name, call.name,
-                                               call.arguments)], policy=TaskPolicy(on_step_failure="fail"))
+                                               call.arguments)], policy=TaskPolicy(on_step_failure="fail"),
+                                   cwd=ctx.cwd)
             try:
                 done = await svc.pool.wait_for(task.id, [S.COMPLETED, S.FAILED, S.WAITING, S.BLOCKED, S.CANCELLED],
                                                timeout=20.0)
@@ -1307,7 +1318,7 @@ class Orchestrator:
         if execution.status == ExecStatus.NEEDS_APPROVAL:
             task = self._user_task(f"{call.name} for: {user_text[:80]}", title=execution.preview[:60],
                                    steps=[Step(execution.preview, call.name, execution.args)],
-                                   policy=TaskPolicy(on_step_failure="fail"))
+                                   policy=TaskPolicy(on_step_failure="fail"), cwd=ctx.cwd)
             try:
                 await svc.pool.wait_for(task.id, [S.WAITING, S.COMPLETED, S.FAILED, S.BLOCKED], timeout=5.0)
             except TimeoutError:

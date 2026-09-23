@@ -76,6 +76,12 @@ def puppets(ollama_url: str):
             "steps": [{"tool": "shell_execute", "description": "echo marker",
                        "args": {"command": "echo puppet-background-marker"}}]}),
             "BACKGROUND-ANSWER: started."),
+        # what llama3.1 did on a real PC: a relative working directory in a background step
+        "background_cwd": Script(tool_call("start_background_task", {
+            "objective": "echo a marker in the background",
+            "steps": [{"tool": "shell_execute", "description": "echo marker",
+                       "args": {"command": "echo puppet-cwd-marker", "cwd": "."}}]}),
+            "BACKGROUND-CWD-ANSWER: started."),
         "shell": Script(tool_call("shell_execute", {"command": "echo puppet-shell-marker"}),
                         "SHELL-ANSWER: the command ran."),
         "hallucinate": Script(tool_call("file_read", {"path": str(workdir / "files" / "nope.txt"), "bogus": 1}),

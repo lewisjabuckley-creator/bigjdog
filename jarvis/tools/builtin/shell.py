@@ -183,7 +183,10 @@ class ShellTool(Tool):
         return f"$ {args['command']}{where}"
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        cwd = os.path.expanduser(args.get("cwd") or ctx.cwd or os.getcwd())
+        base = ctx.cwd or os.getcwd()
+        cwd = os.path.expanduser(args.get("cwd") or base)
+        if not os.path.isabs(cwd):          # "." means the task's working area — the same place scope was checked
+            cwd = os.path.normpath(os.path.join(base, cwd))
         if not os.path.isdir(cwd):
             return ToolResult(False, f"working directory {cwd} does not exist", error="bad_cwd")
         started = time.monotonic()

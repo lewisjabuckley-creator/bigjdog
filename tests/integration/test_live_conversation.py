@@ -119,6 +119,19 @@ async def test_background_request_becomes_a_durable_task(tmp_path, ollama_url, p
         assert "puppet-background-marker" in done.plan[0].result["data"]["stdout"]
 
 
+async def test_relative_working_directory_from_the_model_is_safe(tmp_path, ollama_url, puppets):
+    # JARVIS itself runs from a folder outside the allowed roots (like D:\\JARVIS on Windows); a model's "."
+    # must mean the user's work area, not JARVIS's launch folder, and must not block the task.
+    async with live_jarvis(tmp_path, ollama_url, puppets["background_cwd"]) as (rt, _):
+        reply = await rt.orchestrator().handle("Run the marker job in the background.")
+        assert reply.text == "BACKGROUND-CWD-ANSWER: started."
+        task = next(t for t in rt.svc.tasks.list_tasks() if t.plan and t.plan[0].tool == "shell_execute")
+        done = await rt.svc.pool.wait_for(task.id, [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED],
+                                          timeout=60)
+        assert done.status == TaskStatus.COMPLETED, done.status_reason
+        assert "puppet-cwd-marker" in done.plan[0].result["data"]["stdout"]
+
+
 async def test_long_running_tool_runs_as_a_task(tmp_path, ollama_url, puppets):
     async with live_jarvis(tmp_path, ollama_url, puppets["shell"]) as (rt, sent):
         reply = await rt.orchestrator().handle("Echo the shell marker.")

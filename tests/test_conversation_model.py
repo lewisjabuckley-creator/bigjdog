@@ -4,8 +4,11 @@ model fallback, Ollama request options). Live counterparts are in tests/integrat
 from __future__ import annotations
 
 import json
+import os
+import sys
 
 import httpx
+import pytest
 
 from jarvis.config import ModelsConfig, config_from_dict
 from jarvis.core.intent import IntentKind, parse
@@ -174,3 +177,34 @@ async def test_greeting_names_the_conversation_model(tmp_path):
 def test_for_me_is_not_a_target():
     intent = parse("Could you run the test suite for me?")
     assert intent.kind == IntentKind.RUN_TESTS and intent.params.get("target") is None
+
+
+# -- where commands and relative paths point --------------------------------------------------------------
+
+async def test_work_root_never_points_outside_the_allowed_scope(tmp_path):
+    rt, sim = await _runtime(tmp_path)        # allowed roots: only tmp_path; JARVIS runs from elsewhere
+    try:
+        orch = rt.orchestrator()
+        assert orch._work_root() == str(tmp_path.resolve())
+        rt.svc.permissions.paths.allowed_roots.append(os.path.realpath(os.path.expanduser("~")))
+        assert orch._work_root() == os.path.expanduser("~")         # home when the launch folder isn't allowed
+        project = rt.svc.projects.create("p", str(tmp_path))
+        rt.svc.projects.open(project)
+        assert orch._work_root() == project.root                     # an open project always wins
+    finally:
+        await rt.stop()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the POSIX pwd command")
+async def test_relative_cwd_runs_where_scope_was_checked(tmp_path):
+    from jarvis.permissions.model import Actor
+    from jarvis.tools.base import ToolContext
+    rt, sim = await _runtime(tmp_path)
+    try:
+        area = tmp_path / "area"
+        area.mkdir()
+        ctx = ToolContext(actor=Actor.user(), cwd=str(area), data_dir=str(tmp_path / "d"))
+        ex = await rt.svc.registry.execute("shell_execute", {"command": "pwd", "cwd": "."}, ctx)
+        assert ex.ok and ex.result.data["stdout"].strip() == str(area.resolve())
+    finally:
+        await rt.stop()
