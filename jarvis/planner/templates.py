@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,8 @@ def _python(root: Path) -> str:
     for candidate in (".venv/bin/python", "venv/bin/python", ".venv/Scripts/python.exe"):
         if (root / candidate).exists():
             return candidate
-    return "python3"
+    # Windows: the py launcher ships with python.org installs even when python isn't on PATH
+    return "py" if sys.platform == "win32" else "python3"
 
 
 def _make_targets(root: Path) -> set[str]:

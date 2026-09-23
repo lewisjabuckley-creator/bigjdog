@@ -49,7 +49,7 @@ _READ_ONLY = {
 _GIT_READ_ONLY = {"status", "log", "diff", "show", "branch", "remote", "rev-parse", "describe", "blame",
                   "ls-files", "shortlog", "tag", "config", "stash"}
 _RUNNERS = {  # local build/test/lint tools: reversible execution with local side effects
-    "pytest", "python", "python3", "node", "npm", "pnpm", "yarn", "cargo", "go", "make", "cmake", "ruff",
+    "pytest", "python", "python3", "py", "node", "npm", "pnpm", "yarn", "cargo", "go", "make", "cmake", "ruff",
     "mypy", "black", "flake8", "eslint", "tsc", "jest", "vitest", "gradle", "mvn", "dotnet", "swift", "rustc",
     "gcc", "g++", "clang", "javac", "java", "tox", "nox", "uv", "poetry", "bundle", "rake", "mix", "deno", "bun",
     "mkdir", "touch", "cp",
@@ -89,7 +89,9 @@ def _segments(command: str) -> list[str]:
 
 def _words(segment: str) -> list[str]:
     try:
-        words = shlex.split(segment)
+        # POSIX-mode shlex treats backslashes as escapes, which would mangle Windows paths
+        words = [w.strip('"') for w in shlex.split(segment, posix=False)] if sys.platform == "win32" \
+            else shlex.split(segment)
     except ValueError:
         words = segment.split()
     while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):  # leading VAR=value assignments
@@ -116,7 +118,7 @@ def classify_command(command: str) -> Assessment:
         words = _words(segment)
         if not words:
             continue
-        prog = os.path.basename(words[0])
+        prog = os.path.basename(words[0].replace("\\", "/")).lower().removesuffix(".exe")
         sub = words[1] if len(words) > 1 else ""
         seg_level, seg_risk = PermissionLevel.EXECUTE_CONSEQUENTIAL, RiskLevel.MEDIUM
         why = f"unrecognised command {prog!r}"

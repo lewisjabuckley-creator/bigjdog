@@ -37,7 +37,8 @@ _RESET = "\033[0m"
 
 
 def _color(text: str, prio: NotificationPriority) -> str:
-    if not sys.stdout.isatty():
+    # classic Windows consoles print ANSI codes literally; Windows Terminal (WT_SESSION) handles them
+    if not sys.stdout.isatty() or (sys.platform == "win32" and not os.environ.get("WT_SESSION")):
         return text
     return f"{_COLORS.get(prio, '')}{text}{_RESET}"
 
