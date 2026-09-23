@@ -8,6 +8,7 @@ from jarvis.config import EventsConfig
 from jarvis.core.types import Severity
 from jarvis.database.db import Database, dumps, loads
 from jarvis.events.types import Event
+from jarvis.security.redaction import redact
 
 DAY = 86_400.0
 
@@ -22,7 +23,7 @@ class EventStore:
             "INSERT OR IGNORE INTO events(id, ts, type, source, severity, entity_id, task_id, payload) "
             "VALUES(?,?,?,?,?,?,?,?)",
             (event.id, event.ts, str(event.type), event.source, int(event.severity), event.entity_id,
-             event.task_id, dumps(event.payload)),
+             event.task_id, dumps(redact(event.payload))),
         )
 
     def query(

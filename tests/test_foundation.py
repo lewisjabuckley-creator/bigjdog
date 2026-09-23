@@ -161,3 +161,24 @@ def test_retention(db):
     store.append(Event("X", "t", severity=Severity.ERROR, ts=now - 40 * day))
     assert store.prune(now) == 2
     assert sorted(e.severity for e in store.query()) == [Severity.INFO, Severity.ERROR]
+
+
+def test_example_config_stays_valid():
+    from pathlib import Path
+    path = Path(__file__).resolve().parent.parent / "config" / "jarvis.example.toml"
+    cfg = load_config(path, env={})
+    assert cfg.permissions.interactive_level == 3
+
+
+def test_child_process_environment_has_no_credentials():
+    from jarvis.security.redaction import scrubbed_environment
+    env = scrubbed_environment({"PATH": "/usr/bin", "OPENAI_API_KEY": "sk-x", "GITHUB_TOKEN": "t",
+                                "DB_PASSWORD": "p", "SSH_AUTH_SOCK": "/tmp/agent", "HOME": "/home/u"})
+    assert env == {"PATH": "/usr/bin", "SSH_AUTH_SOCK": "/tmp/agent", "HOME": "/home/u"}
+
+
+def test_persisted_events_are_redacted(db):
+    store = EventStore(db)
+    store.append(Event("APPROVAL_REQUESTED", "t", {"summary": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz'"},
+                       ts=1.0))
+    assert "abcdefghijklmnop" not in str(store.query()[0].payload)

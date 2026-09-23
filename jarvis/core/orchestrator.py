@@ -25,7 +25,7 @@ from jarvis.core.intent import Intent, IntentKind, is_pronoun, parse
 from jarvis.core.modes import Mode
 from jarvis.core.references import ConversationFocus, ReferenceResolver
 from jarvis.core.services import Services
-from jarvis.core.types import Confidence, OperationalReason, Priority, Provenance, ProvenanceKind
+from jarvis.core.types import OperationalReason, Priority, Provenance, ProvenanceKind, new_id
 from jarvis.events.types import Event, EventType
 from jarvis.log import get_logger
 from jarvis.memory.store import MemoryKind
@@ -83,6 +83,7 @@ class Orchestrator:
         previous = svc.state.value("session.last_seen")
         self.session_since: float = float(previous) if isinstance(previous, (int, float)) else svc.clock.now() - 86400
         self.last_changes_check: float | None = None
+        self._inline_tasks: list[str] = []      # tasks whose outcome is reported in the current reply
         self._register_internal_tools()
         self.handlers: dict[IntentKind, Handler] = {
             IntentKind.STATUS: self._status, IntentKind.REENTRY: self._reentry, IntentKind.BRIEFING: self._briefing,
@@ -130,12 +131,16 @@ class Orchestrator:
                 log.error("handler_failed", intent=intent.kind.value, error=repr(exc))
                 response = Response(f"Something went wrong while handling that ({exc}). It's logged; nothing else "
                                     "was affected.", intent.kind, kind="error")
-        if response.task_id and response.intent in (IntentKind.SHELL, IntentKind.CHAT) and \
-                response.kind in ("action", "question", "answer"):
+        inline = list(self._inline_tasks)
+        self._inline_tasks.clear()
+        if response.task_id and response.intent in (IntentKind.SHELL, IntentKind.CHAT):
+            inline.append(response.task_id)
+        if inline:
             await svc.bus.drain()
-            task = svc.tasks.get_task(response.task_id)
-            if task is not None and (task.terminal or task.status == S.WAITING):
-                svc.notifications.acknowledge_task(task.id)   # already reported inline
+            for task_id in inline:
+                task = svc.tasks.get_task(task_id)
+                if task is not None and (task.terminal or task.status == S.WAITING):
+                    svc.notifications.acknowledge_task(task.id)   # already reported inline
         if response.kind != "question" and self._may_deliver_queued(response.intent):
             delivered = svc.notifications.drain(limit=3)
             response.notifications = [n for n in delivered if n.title not in response.text]
@@ -160,7 +165,6 @@ class Orchestrator:
         self.history = self.history[-40:]
         if self.svc.memory.suppressed:
             return   # "don't remember this" covers the conversation log too
-        from jarvis.core.types import new_id
         self.svc.db.execute("INSERT INTO conversation(id, ts, session_id, user_id, role, content, meta) "
                             "VALUES(?,?,?,?,?,?,?)", (new_id("msg"), self.svc.clock.now(), self.session_id,
                                                       self.svc.user, role, content, json.dumps(meta or {})))
@@ -1202,6 +1206,7 @@ class Orchestrator:
             except TimeoutError:
                 return {"status": "running_in_background", "task_id": task.id,
                         "message": "still running; the user will be notified"}, None
+            self._inline_tasks.append(task.id)
             if done.status == S.WAITING:
                 pending = [a for a in svc.approvals.pending() if a.task_id == task.id]
                 summary = pending[0].summary if pending else call.name

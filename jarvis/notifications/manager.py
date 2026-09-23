@@ -19,6 +19,7 @@ from jarvis.core.types import NotificationPriority, Severity, new_id
 from jarvis.database.db import Database
 from jarvis.events.bus import EventBus
 from jarvis.events.types import Event, EventType
+from jarvis.security.redaction import redact_text
 
 NP = NotificationPriority
 Sink = Callable[["Notification"], None]
@@ -151,7 +152,8 @@ class NotificationManager:
             "ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, priority=excluded.priority, title=excluded.title, "
             "body=excluded.body, count=excluded.count, state=excluded.state, delivered_at=excluded.delivered_at, "
             "acknowledged_at=excluded.acknowledged_at",
-            (n.id, n.ts, int(n.priority), n.title, n.body, n.source, n.task_id, n.dedupe_key, n.count, n.state,
+            (n.id, n.ts, int(n.priority), redact_text(n.title), redact_text(n.body or ""), n.source, n.task_id,
+             n.dedupe_key, n.count, n.state,
              n.expires_at, n.delivered_at, n.acknowledged_at))
 
     def pending(self) -> list[Notification]:
@@ -260,9 +262,13 @@ class NotificationManager:
         if t == EventType.TREND_DETECTED:
             return NP.INFORMATIONAL, p.get("message", "trend detected"), "", f"trend:{p.get('metric')}"
         if t == EventType.SUBSYSTEM_DEGRADED:
+            if str(p.get("component", "")).startswith("model:"):
+                return None     # MODEL_UNAVAILABLE reports model outages with better wording
             prio = NP.URGENT if e.severity >= Severity.ERROR else NP.IMPORTANT
             return prio, f"{p.get('component')} is {p.get('status')}", p.get("detail", ""), f"subsystem:{p.get('component')}"
         if t == EventType.SUBSYSTEM_RECOVERED:
+            if str(p.get("component", "")).startswith("model:"):
+                return NP.INFORMATIONAL, f"Model provider {p['component'][6:]} is back", "", None
             return NP.INFORMATIONAL, f"{p.get('component')} recovered", "", None
         if t == EventType.MODEL_UNAVAILABLE:
             return NP.IMPORTANT, f"Model provider {p.get('provider')} is unavailable", p.get("error", ""), \

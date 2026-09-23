@@ -121,7 +121,8 @@ rule(r"where (were|are) we|where did we leave off|what are we (working on|doing)
      IntentKind.REENTRY)
 rule(r"(good )?morning|(daily |morning )?briefing|brief me|what'?s (on )?today|daily summary", IntentKind.BRIEFING)
 rule(r"what changed|what'?s changed|what has changed|what'?s new|what did i miss|anything new", IntentKind.WHAT_CHANGED)
-rule(r"what'?s wrong( with (?P<target>.+))?|what happened( (to|with) (?P<target2>.+))?|"
+rule(r"(what'?s|what is|is (there )?something|is anything) wrong( with (?P<target>.+))?|"
+     r"what happened( (to|with) (?P<target2>.+))?|what'?s the problem|"
      r"(check |find out |tell me )?why (did )?(?P<target3>.+?) (fail(ed)?|crash(ed)?|break|broke|stop(ped)?)|"
      r"why is (?P<target4>.+?) (slow|failing|down|broken|not working|stuck|waiting|blocked)|diagnose( (?P<target5>.+))?|"
      r"show me what'?s causing the problem|why is it slow",

@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from jarvis.agents.base import AgentRegistry, AgentRunner, DelegateToAgentTool
 from jarvis.audit.log import AuditLog
 from jarvis.automation.engine import AutomationEngine, notify_action
 from jarvis.clock import Clock, SystemClock
@@ -149,6 +150,8 @@ class Runtime:
                              local_only=lambda: modes.effective().local_only or bool(state.value("models.prefer_local")),
                              allow_cloud=lambda: cfg.privacy.allow_cloud and not modes.private)
         planner = Planner(registry, router)
+        agents = AgentRegistry()
+        registry.register(DelegateToAgentTool(agents, AgentRunner(registry, router)))
 
         async def verify_command(command: str, cwd: str | None) -> tuple[int | None, str]:
             ctx = ToolContext(actor=Actor("system", "verifier"), cwd=cwd, clock=clock, data_dir=str(data))
@@ -178,7 +181,8 @@ class Runtime:
         tasks.on_cancel.append(lambda t: approvals.cancel_for_task(t.id))
         return Services(cfg, clock, db, bus, events, state, world, health, permissions, approvals, audit, registry,
                         router, tasks, resources, pool, memory, decisions, projects, modes, notifications, emergency,
-                        automations, devices, metrics, user=cfg.general.user, simulated=self.simulated)
+                        automations, devices, metrics, user=cfg.general.user, simulated=self.simulated,
+                        extra={"agents": agents})
 
     def _default_providers(self) -> list[ModelProvider]:
         cfg = self.config.models

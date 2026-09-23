@@ -26,12 +26,23 @@ class PsutilMetrics:
         self._gpu_cache_s = gpu_cache_s
         self._nvidia_smi = shutil.which("nvidia-smi")
         psutil.cpu_percent(interval=None)  # prime the counter
+        self._primed_at = time.monotonic()
+
+    def _cpu_percent(self) -> float:
+        # A reading taken just after priming covers only milliseconds and is meaningless (often 0 or 100%);
+        # measure over a short window instead.
+        if time.monotonic() - self._primed_at < 0.5:
+            value = psutil.cpu_percent(interval=0.5)
+        else:
+            value = psutil.cpu_percent(interval=None)
+        self._primed_at = -1e9
+        return value
 
     def sample(self) -> dict[str, Any]:
         vm = psutil.virtual_memory()
         du = psutil.disk_usage(self.disk_path)
         data: dict[str, Any] = {
-            "cpu_percent": psutil.cpu_percent(interval=None),
+            "cpu_percent": self._cpu_percent(),
             "cpu_count": psutil.cpu_count(),
             "memory_percent": vm.percent,
             "memory_used_gb": round(vm.used / 2**30, 2),

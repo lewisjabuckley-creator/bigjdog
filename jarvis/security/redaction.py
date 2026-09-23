@@ -59,3 +59,15 @@ def redact(value: Any, _depth: int = 0) -> Any:
     if isinstance(value, str):
         return redact_text(value)
     return value
+
+
+_CREDENTIAL_ENV = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL)",
+                             re.IGNORECASE)
+
+
+def scrubbed_environment(env: dict[str, str]) -> dict[str, str]:
+    """Environment for child processes without credential-looking variables (spec §83).
+
+    Tools that genuinely need a credential receive it explicitly via a ``secret://`` reference.
+    """
+    return {k: v for k, v in env.items() if not _CREDENTIAL_ENV.search(k)}

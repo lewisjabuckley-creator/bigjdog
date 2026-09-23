@@ -24,6 +24,7 @@ from typing import Any
 
 from jarvis.core.types import Provenance, ProvenanceKind, RiskLevel
 from jarvis.permissions.model import PermissionLevel
+from jarvis.security.redaction import scrubbed_environment
 from jarvis.tools.base import Assessment, Tool, ToolContext, ToolResult, ToolSpec, Verification
 
 MAX_OUTPUT = 64_000
@@ -189,7 +190,7 @@ class ShellTool(Tool):
             kwargs["start_new_session"] = True  # own process group so timeouts kill children too
         proc = await asyncio.create_subprocess_shell(
             args["command"], cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.DEVNULL, **kwargs)
+            stdin=asyncio.subprocess.DEVNULL, env=scrubbed_environment(dict(os.environ)), **kwargs)
         try:
             stdout, stderr = await proc.communicate()
         except asyncio.CancelledError:

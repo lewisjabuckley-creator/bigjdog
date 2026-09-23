@@ -499,11 +499,25 @@ def diagnose(svc: Services, task: Task | None = None) -> Diagnosis:
     return d
 
 
-def _top_process() -> str | None:
+def _top_process(window_s: float = 0.2) -> str | None:
+    """Name of the process using the most CPU, measured over a short window (psutil's first reading per
+    process is always 0, so a single pass would name an arbitrary process)."""
     try:
-        procs = sorted(psutil.process_iter(["name", "cpu_percent"]), key=lambda p: p.info.get("cpu_percent") or 0,
-                       reverse=True)
-        return procs[0].info.get("name") if procs else None
+        procs = list(psutil.process_iter(["name"]))
+        for p in procs:
+            try:
+                p.cpu_percent(None)
+            except psutil.Error:
+                pass
+        time.sleep(window_s)
+        usage = []
+        for p in procs:
+            try:
+                usage.append((p.cpu_percent(None), p.info.get("name")))
+            except psutil.Error:
+                continue
+        usage.sort(reverse=True)
+        return usage[0][1] if usage and usage[0][0] > 5.0 else None
     except Exception:
         return None
 
