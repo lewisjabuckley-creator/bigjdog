@@ -97,6 +97,8 @@ class AutomationEngine:
         self.clock = clock or SystemClock()
         self.handlers: dict[str, ActionHandler] = {"task": self._task_action}
         self._cache: list[Automation] | None = None
+        self.max_fires_per_minute = 10
+        self._fires: dict[str, list[float]] = {}
 
     # -- CRUD ------------------------------------------------------------------------------
     def create(self, name: str, kind: str, spec: dict[str, Any], *, owner: str = "owner") -> Automation:
@@ -154,12 +156,27 @@ class AutomationEngine:
         for auto in self.list(enabled_only=True):
             if auto.kind != "rule" or auto.spec.get("when") != str(event.type):
                 continue
+            if event.payload.get("created_by") == f"automation:{auto.id}":
+                continue   # an automation never reacts to the work it created itself
+            if self._rate_limited(auto):
+                continue
             if matches(auto.spec.get("if"), {"payload": event.payload, "task_id": event.task_id,
                                              "severity": event.severity.name.lower(), "source": event.source}):
                 await self._fire(auto, event)
 
+    def _rate_limited(self, auto: Automation) -> bool:
+        """Defence in depth against cascades between automations."""
+        now = self.clock.now()
+        recent = [t for t in self._fires.get(auto.id, []) if now - t < 60]
+        self._fires[auto.id] = recent
+        if len(recent) >= self.max_fires_per_minute:
+            log.warning("automation_rate_limited", automation=auto.id)
+            return True
+        return False
+
     async def _fire(self, auto: Automation, event: Event | None) -> None:
         now = self.clock.now()
+        self._fires.setdefault(auto.id, []).append(now)
         auto.last_run = now
         auto.run_count += 1
         self.db.execute("UPDATE automations SET last_run=?, next_run=?, run_count=? WHERE id=?",

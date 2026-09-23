@@ -37,7 +37,7 @@ class RecoveryPolicy:
                can_replan: bool | None = None) -> RecoveryDecision:
         can_replan = self.planner_available if can_replan is None else can_replan
         policy = task.policy
-        err = (execution.result.error if execution.result else None) or execution.message or "unknown error"
+        err = step.error or (execution.result.error if execution.result else None) or execution.message or "unknown error"
         verification_failed = bool(execution.verification and execution.verification.performed
                                    and execution.verification.passed is False and execution.result
                                    and execution.result.ok)

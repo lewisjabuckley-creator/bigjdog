@@ -417,6 +417,7 @@ class Diagnosis:
 
 _ERROR_HINTS = [
     ("no such file", "a file or path the step needed does not exist", "check the path or create the missing file"),
+    ("does not exist", "a file or path the step needed does not exist", "check the path or create the missing file"),
     ("not found", "a command, file or resource was not found", "check that the tool or file is installed/present"),
     ("permission denied", "the operation lacked filesystem or OS permissions", "check file permissions"),
     ("timeout", "the operation took longer than its time limit", "retry with a longer timeout or investigate the hang"),

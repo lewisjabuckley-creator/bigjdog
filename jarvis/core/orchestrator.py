@@ -188,8 +188,13 @@ class Orchestrator:
                     "4": 3, "fourth": 3, "last": len(pq["ids"]) - 1, "the last one": len(pq["ids"]) - 1}
         index = ordinals.get(lowered)
         if index is None:
-            matches = [i for i, label in enumerate(pq["labels"]) if label and (lowered in label.lower()
-                                                                               or label.lower() in lowered)]
+            fillers = {"the", "one", "a", "an", "that", "this", "please", "i", "mean", "its", "it's", "option",
+                       "number", "yes", "go", "with"}
+            tokens = [w for w in re.findall(r"[a-z0-9']+", lowered) if w not in fillers]
+            matches = [i for i, label in enumerate(pq["labels"])
+                       if label and tokens and all(any(lw.startswith(t) for lw in re.findall(r"[a-z0-9']+",
+                                                                                              label.lower()))
+                                                   for t in tokens)]
             index = matches[0] if len(matches) == 1 else None
         if index is None or index >= len(pq["ids"]):
             return None   # not an answer; treat as a new request

@@ -159,14 +159,14 @@ class TaskExecutor:
         if execution.ok or (execution.status == ExecStatus.EXECUTED and step.allow_failure
                             and execution.verification is not None and execution.verification.passed is not False):
             step.status = StepStatus.DONE
-            step.error = None if execution.ok else (execution.result.error if execution.result else None)
+            step.error = None if execution.ok else _error_text(execution)
             self.manager.checkpoint_task(task, f"completed {step.description}")
             self._progress(task, step)
             return "next"
         return await self._recover(task, step, execution, controller)
 
     async def _recover(self, task: Task, step: Step, execution: Execution, controller: TaskController) -> str:
-        step.error = (execution.result.error if execution.result else None) or execution.message
+        step.error = _error_text(execution)
         tool = self.registry.get(step.tool) if step.tool else None
         can_replan = self.planner is not None and self.planner.available and task.policy.on_step_failure == "replan"
         decision = self.recovery.decide(task, step, execution, idempotent=bool(tool and tool.spec.idempotent),
@@ -332,6 +332,17 @@ class TaskExecutor:
             self.manager.checkpoint_task(fresh, "interrupted by shutdown")
             self.manager.mark_interrupted(fresh)
         return fresh
+
+
+def _error_text(execution: Execution) -> str:
+    """A human-readable error: machine codes like 'not_found' are replaced by the tool's own summary."""
+    result = execution.result
+    if result is None:
+        return execution.message or "unknown error"
+    error = result.error or ""
+    if not error or (" " not in error and len(error) < 30):
+        return result.summary or error or execution.message
+    return error
 
 
 def summarize_step_result(step: Step) -> dict[str, Any]:
