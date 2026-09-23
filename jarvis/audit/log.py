@@ -103,6 +103,17 @@ class AuditLog:
         return _row(row) if row else None
 
 
+    def last_decision(self, since: float | None = None) -> AuditEntry | None:
+        """Most recent autonomous control decision (pause, resume, retry, recovery...) made by JARVIS itself."""
+        sql = "SELECT * FROM audit WHERE reason IS NOT NULL AND actor LIKE 'system:%'"
+        params: list[Any] = []
+        if since is not None:
+            sql += " AND ts >= ?"
+            params.append(since)
+        row = self.db.query_one(sql + " ORDER BY ts DESC, rowid DESC LIMIT 1", params)
+        return _row(row) if row else None
+
+
 def _row(r: Any) -> AuditEntry:
     return AuditEntry(r["id"], r["ts"], r["actor"], r["action"], r["tool"], r["task_id"], loads(r["params"], {}),
                       None if r["ok"] is None else bool(r["ok"]), r["outcome"], r["summary"] or "",
