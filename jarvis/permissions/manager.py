@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Callable
 
 from jarvis.clock import Clock, SystemClock
 from jarvis.config import PermissionsConfig
@@ -24,9 +25,15 @@ from jarvis.permissions.model import AccessRequest, Actor, Decision, Grant, Perm
 class PathPolicy:
     """Filesystem scope. Paths are resolved (symlinks included) before checking."""
 
-    def __init__(self, allowed_roots: list[str], denied_paths: list[str]) -> None:
+    def __init__(self, allowed_roots: list[str], denied_paths: list[str],
+                 extra_roots: Callable[[], list[str]] | None = None) -> None:
         self.allowed_roots = [self._norm(p) for p in allowed_roots]
         self.denied_paths = [self._norm(p) for p in denied_paths]
+        # Roots the user has explicitly registered (e.g. project folders) extend the allowed scope.
+        self.extra_roots = extra_roots or (lambda: [])
+
+    def roots(self) -> list[str]:
+        return self.allowed_roots + [self._norm(p) for p in self.extra_roots()]
 
     @staticmethod
     def _norm(path: str) -> str:
@@ -44,7 +51,7 @@ class PathPolicy:
         for denied in self.denied_paths:
             if _within(resolved, denied) and not any(_within(resolved, g) and _within(g, denied) for g in granted):
                 return False, f"{resolved} is inside protected path {denied}"
-        if not any(_within(resolved, root) for root in self.allowed_roots) \
+        if not any(_within(resolved, root) for root in self.roots()) \
                 and not any(_within(resolved, g) for g in granted):
             return False, f"{resolved} is outside the allowed roots"
         if allowed_dirs is not None:

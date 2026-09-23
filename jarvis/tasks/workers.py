@@ -78,8 +78,7 @@ class WorkerPool:
             await asyncio.wait(list(self.running.values()), timeout=timeout)
         for runner in list(self.running.values()):
             runner.cancel()
-        if self.health:
-            self.health.report("workers", HealthStatus.OFFLINE, "stopped")
+        # an intentional stop is not a failure: no degradation is reported
 
     async def _loop(self) -> None:
         assert self._kick is not None

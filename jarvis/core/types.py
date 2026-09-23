@@ -192,9 +192,11 @@ class OperationalReason:
         }
 
     def sentence(self) -> str:
-        text = f"I {self.action} because {self.condition}"
+        text = f"I {self.action} because {self.condition.rstrip('.')}"
         if self.rule:
             text += f" ({self.rule})"
+        text += "."
         if self.expected:
-            text += f". {self.expected}"
-        return text + "."
+            expected = self.expected.strip()
+            text += f" {expected}" + ("" if expected.endswith((".", "!", "?")) else ".")
+        return text

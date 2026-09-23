@@ -66,15 +66,13 @@ class NotificationManager:
     # -- attention ------------------------------------------------------------------
     def on_user_input(self) -> None:
         self.last_user_input = self.clock.now()
-        self.user_activity = "idle"
 
     def set_activity(self, activity: str) -> None:
         self.user_activity = activity
 
     def user_busy(self) -> bool:
-        if self.user_activity in ("typing", "speaking"):
-            return True
-        return False
+        # "conversing": JARVIS is answering the user right now; the answer is the right place for news.
+        return self.user_activity in ("typing", "speaking", "conversing", "presenting")
 
     def user_idle_for(self) -> float:
         return float("inf") if self.last_user_input is None else self.clock.now() - self.last_user_input
@@ -197,6 +195,18 @@ class NotificationManager:
             self._queue.pop(n.id, None)
             self._persist(n)
         return len(targets)
+
+    def acknowledge_task(self, task_id: str) -> int:
+        """Mark queued notifications about a task as seen (e.g. its result was just reported inline)."""
+        count = 0
+        for n in list(self._queue.values()):
+            if n.task_id == task_id:
+                n.state = "acknowledged"
+                n.acknowledged_at = self.clock.now()
+                self._queue.pop(n.id, None)
+                self._persist(n)
+                count += 1
+        return count
 
     def history(self, limit: int = 20, min_priority: NotificationPriority = NP.INFORMATIONAL) -> list[dict[str, Any]]:
         rows = self.db.query("SELECT * FROM notifications WHERE priority >= ? ORDER BY ts DESC, rowid DESC LIMIT ?",
