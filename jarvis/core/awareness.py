@@ -128,6 +128,12 @@ def away_report(svc: Services, since: float | None = None, until: float | None =
         if task.kind == TaskKind.MONITOR or task.finished_at is None or not since <= task.finished_at <= end:
             continue
         report.finished.append(_task_brief(task))
+    # plus anything you asked for whose outcome you haven't been shown yet, even if it finished before this
+    # absence began (e.g. the runtime restarted while a window was open, which restarts the absence clock)
+    seen_ids = {t["id"] for t in report.finished}
+    for task in unreported_results(svc):
+        if task.id not in seen_ids:
+            report.finished.append(_task_brief(task))
     report.finished.sort(key=lambda t: t["finished_at"])
     for task in svc.tasks.list_tasks(OPEN, order="recent", limit=50):
         if task.kind == TaskKind.MONITOR:
@@ -164,6 +170,27 @@ def away_report(svc: Services, since: float | None = None, until: float | None =
         report.notifications.append({"id": n["id"], "ts": n["ts"], "text": n["text"], "state": n["state"]})
     report.notifications = report.notifications[-6:]
     return report
+
+
+REPORTED = "result_reported_at"
+
+
+def unreported_results(svc: Services, days: float = 3.0, limit: int = 5) -> list[Task]:
+    """Your most recent finished tasks (last ``days``) whose outcome has not been reported to you in a
+    conversation."""
+    since = svc.clock.now() - days * 86400
+    return [t for t in svc.tasks.list_tasks([S.COMPLETED, S.FAILED], since=since, order="recent", limit=100)
+            if t.kind != TaskKind.MONITOR and t.created_by.startswith("user") and not t.outputs.get(REPORTED)][:limit]
+
+
+def mark_reported(svc: Services, task_ids: list[str]) -> None:
+    """The user has now been told these outcomes (in a reply or a "while you were away" answer)."""
+    now = svc.clock.now()
+    for task_id in task_ids:
+        task = svc.tasks.get_task(task_id)
+        if task is not None and task.terminal and not task.outputs.get(REPORTED):
+            task.outputs[REPORTED] = now
+            svc.tasks.save(task)
 
 
 def _task_brief(task: Task) -> dict[str, Any]:

@@ -226,4 +226,6 @@ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 | The interface says it lost contact | The runtime stopped or restarted. Send a message: the CLI reconnects, starting the runtime if needed, and resends the same request id, so nothing is done twice. |
 | `jarvis runtime start` says it exited during startup | The message includes the end of `logs/runtime.out`; the full log is there. |
 | Windows: a console window flashes up every few seconds | Fixed after 0.2.0: an older runtime ran without any console, so each GPU check (`nvidia-smi`) opened a window. Update, then run `py -m jarvis runtime restart` so the old runtime is replaced. |
+| I typed `py -m jarvis ...` into the chat | JARVIS explains that it's a terminal command and doesn't run it. It never runs its own control commands, because running `runtime stop` from inside would stop it mid-command. Type `/quit`, then run the command in Command Prompt. |
+| Leftover tasks I don't want | In the chat: "cancel everything" (or "cancel the <name> task"); or `jarvis task <id> cancel`. |
 | A task says "outcome unknown" | JARVIS was stopped while that step ran. Check whether its effect happened, then `continue` (run it again) or cancel the task. |

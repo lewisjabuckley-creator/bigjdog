@@ -45,6 +45,13 @@ class RecoveryPolicy:
         def reason(condition: str, rule: str, action: str, expected: str = "") -> OperationalReason:
             return OperationalReason(condition, rule, action, expected, {"step": step.description})
 
+        if execution.status == ExecStatus.DENIED and execution.decision is not None \
+                and execution.decision.basis == "safety":
+            # an absolute safety constraint: no grant or approval can ever allow it, so waiting would be pointless
+            return RecoveryDecision(RecoveryAction.FAIL, reason(
+                f"'{step.description}' is refused by the safety policy ({execution.message})",
+                "some actions are never executed, whatever the authority", "stopped the task",
+                "Nothing was run."))
         if execution.status == ExecStatus.DENIED:
             return RecoveryDecision(RecoveryAction.BLOCK, reason(
                 f"'{step.description}' was not authorized ({execution.message})",

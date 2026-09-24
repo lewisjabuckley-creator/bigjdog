@@ -99,7 +99,8 @@ class StartupReport:
         interrupted = [r for r in self.recovered if not r.resumed]
         resumed = [r for r in self.recovered if r.resumed]
         if interrupted:
-            parts.append(" ".join(r.summary for r in interrupted[:2]) + " Say 'continue' to resume.")
+            text = " ".join(r.summary for r in interrupted[:2])
+            parts.append(text if "'continue'" in text else text + " Say 'continue' to resume.")
         if resumed:
             parts.append(f"Resumed {len(resumed)} task{'s' if len(resumed) != 1 else ''} after the restart.")
         parts += self.issues[:3]

@@ -50,6 +50,7 @@ class IntentKind(StrEnum):
     SHELL = "shell"
     OPEN_PROJECT = "open_project"
     ANALYZE_PROJECT = "analyze_project"
+    CLI_COMMAND = "cli_command"          # a Command Prompt command for JARVIS typed into the conversation
     REPEAT_FOR = "repeat_for"
     PRIORITY = "priority"
     TIME = "time"
@@ -208,6 +209,18 @@ rule(r"(open|switch to|load|work on) (the )?(?P<target>other one|.+?)( project)?
 rule(r"do the same (thing )?for (the )?(?P<target>.+?)( project)?", IntentKind.REPEAT_FOR, _t)
 
 
+# `py -m jarvis ...`, `python3 -m jarvis ...`, `jarvis runtime stop`: commands that control JARVIS itself. Typed into
+# the conversation they belong in a terminal; run by JARVIS they would act on JARVIS mid-task (e.g. stop it).
+_SELF_COMMAND = re.compile(
+    r"(^|[;&|]\s*)\$?\s*[\"']?(?:[\w:\\/.-]*[\\/])?(py|pythonw?(\d+(\.\d+)?)?)(\.exe)?[\"']?\s+(-\d(\.\d+)?\s+)?-m\s+jarvis\b"
+    r"|(^|[;&|]\s*)\$?\s*jarvis(\.exe)?\s+(runtime|doctor|ask|schedule|--embedded|--simulate|--data-dir|--config)\b",
+    re.IGNORECASE)
+
+
+def is_self_command(text: str) -> bool:
+    return bool(_SELF_COMMAND.search(text.strip().strip("`")))
+
+
 def normalise(text: str) -> str:
     text = text.strip()
     text = _PREFIX.sub("", text, count=1)
@@ -218,6 +231,8 @@ def normalise(text: str) -> str:
 
 def parse(text: str) -> Intent:
     raw = text.strip()
+    if is_self_command(raw):
+        return Intent(IntentKind.CLI_COMMAND, raw, params={"command": raw.lstrip("$ ").strip("`").strip()})
     dry_run = False
     body = normalise(raw)
     m = re.match(r"^dry[- ]run[:,]?\s*(?P<rest>.*)$", body, re.IGNORECASE)

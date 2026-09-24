@@ -528,3 +528,95 @@ async def test_the_briefing_pipeline_stores_and_announces_data(tmp_path):
         assert any(n.title == "Your briefing is ready" for n in rt.svc.notifications.pending())
     finally:
         await rt.stop()
+
+
+async def test_an_unseen_result_is_reported_even_if_it_finished_before_the_away_window(tmp_path):
+    """Seen on a real PC: the analysis finished, then the runtime restarted while an interface was attached, so
+    the absence was measured from the restart and "what happened while I was away?" left the result out."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "app.py").write_text("print(1)\n")
+    rt, sim = make_runtime(str(tmp_path), mode="daemon")
+    sim.provider.when("Analyze the software project", "REPORT: one Python file.")
+    await rt.start()
+    reply = await rt.orchestrator().handle("Analyze this project.", cwd=str(project))
+    await rt.svc.pool.wait_for(reply.task_id)
+    me = rt.svc.presence.attach("cli")               # the user is here when the runtime goes down
+    await rt.stop()
+    rt2, _ = make_runtime(str(tmp_path), mode="daemon", sim=sim)
+    await rt2.start()
+    try:
+        await asyncio.sleep(0.05)
+        back = rt2.svc.presence.attach("cli")
+        assert back.away_since is not None and back.away_since > rt2.svc.tasks.get_task(reply.task_id).finished_at
+        answer = await rt2.orchestrator().handle("What happened while I was away?")
+        assert "Analyze proj — completed" in answer.text and "REPORT: one Python file." in answer.text
+        again = await rt2.orchestrator().handle("What happened while I was away?")
+        assert "REPORT: one Python file." not in again.text          # reported once, not forever
+        assert me.client_id
+    finally:
+        await rt2.stop()
+
+
+# -- found on a real PC after the first Phase 2 build ---------------------------------------------------------
+
+async def test_a_jarvis_command_typed_into_the_chat_is_explained_not_run(tmp_path):
+    from jarvis.models.base import ToolCall
+    rt, sim = make_runtime(str(tmp_path), mode="daemon")
+    await rt.start()
+    try:
+        svc = rt.svc
+        reply = await rt.orchestrator().handle("py -m jarvis runtime stop")
+        assert reply.intent == IntentKind.CLI_COMMAND and "Command Prompt" in reply.text
+        assert "Closing this window doesn't stop me" in reply.text
+        assert not svc.tasks.list_tasks(limit=10) and not svc.audit.query(action="tool_execute")
+        # and if the model tries to run one itself, the shell tool refuses without asking for approval
+        sim.provider.when("stop yourself", tool_calls=[ToolCall("shell_execute",
+                                                                {"command": "py -m jarvis runtime stop"})], once=True)
+        sim.provider.when("controls JARVIS itself", "I can't stop myself from here.")
+        await rt.orchestrator().handle("please stop yourself")
+        runs = [e for e in svc.audit.query(limit=20) if e.tool == "shell_execute"]
+        assert runs and not runs[0].ok and "controls JARVIS itself" in runs[0].summary
+        assert not svc.approvals.pending() and rt.started
+    finally:
+        await rt.stop()
+
+
+async def test_a_safety_blocked_step_fails_the_task_instead_of_waiting_forever(tmp_path):
+    engine = build_engine(str(tmp_path))
+    await engine.pool.start()
+    engine.permissions.grant("*", PermissionLevel.AUTONOMOUS, tools=["shell_execute"])     # even with a grant
+    task = engine.tasks.create_task("wipe", steps=[Step("wipe", "shell_execute", {"command": "rm -rf /"})])
+    done = await engine.pool.wait_for(task.id)
+    assert done.status == S.FAILED and "safety policy" in done.status_reason
+    await engine.pool.stop()
+
+
+async def test_completion_notifications_show_the_result_not_the_verification(tmp_path):
+    rt, sim = make_runtime(str(tmp_path), mode="daemon")
+    sim.provider.when("Summarize the scan", "The folder holds one small Python script and nothing else.")
+    await rt.start()
+    try:
+        task = rt.svc.tasks.create_task("summarize", created_by="user:owner", steps=[
+            Step("scan", "project_scan", {"path": str(tmp_path)}),
+            Step("write it up", "model_report", {"instruction": "Summarize the scan", "material": {"$from_step": 0}})])
+        done = await rt.svc.pool.wait_for(task.id)
+        await rt.svc.bus.drain()
+        assert done.status_reason == "all steps completed and verified"
+        note = next(n for n in rt.svc.notifications.pending() if n.task_id == task.id)
+        assert note.text() == "Summarize finished. The folder holds one small Python script and nothing else."
+    finally:
+        await rt.stop()
+
+
+def test_recovery_messages_say_continue_once():
+    from jarvis.runtime import StartupReport
+    from jarvis.tasks.manager import RecoveryReport
+    summary = "job was interrupted during 'x'. I haven't resumed it: it's unknown. Say 'continue' to resume."
+    greeting = StartupReport(recovered=[RecoveryReport("t1", "job", summary, False, "paused", True)]).greeting()
+    assert greeting.count("Say 'continue' to resume.") == 1
+
+
+def test_control_characters_never_reach_jarvis():
+    from jarvis.cli import _clean_input
+    assert _clean_input("\x01") == "" and _clean_input(" what's up?\x01 ") == "what's up?"

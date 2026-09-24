@@ -22,6 +22,7 @@ import sys
 import time
 from typing import Any
 
+from jarvis.core.intent import is_self_command
 from jarvis.core.types import Provenance, ProvenanceKind, RiskLevel
 from jarvis.permissions.model import PermissionLevel
 from jarvis.platforms import hidden_window_kwargs
@@ -102,6 +103,9 @@ def _words(segment: str) -> list[str]:
 
 def classify_command(command: str) -> Assessment:
     text = command.strip()
+    if is_self_command(text):
+        # never executed (see ShellTool.run), so asking for approval would only be noise
+        return Assessment(PermissionLevel.OBSERVE, RiskLevel.NONE, "controls JARVIS itself (refused)")
     for pattern in _CATASTROPHIC:
         if pattern.search(text):
             return Assessment(PermissionLevel.AUTONOMOUS, RiskLevel.CRITICAL, "catastrophic command pattern",
@@ -184,6 +188,10 @@ class ShellTool(Tool):
         return f"$ {args['command']}{where}"
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if is_self_command(args["command"]):
+            return ToolResult(False, f"`{_short(args['command'])}` controls JARVIS itself, so it isn't run from inside "
+                                     "JARVIS (it could stop JARVIS in the middle of running it). Run it in a terminal.",
+                              error="self_command")
         base = ctx.cwd or os.getcwd()
         cwd = os.path.expanduser(args.get("cwd") or base)
         if not os.path.isabs(cwd):          # "." means the task's working area — the same place scope was checked

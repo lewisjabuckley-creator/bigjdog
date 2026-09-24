@@ -120,6 +120,7 @@ class Orchestrator:
             IntentKind.REPEAT_FOR: self._repeat_for, IntentKind.TIME: self._time, IntentKind.SELF: self._self,
             IntentKind.HELP: self._help, IntentKind.SHORTER: self._shorter, IntentKind.LONGER: self._longer,
             IntentKind.CHAT: self._chat, IntentKind.AWAY: self._away, IntentKind.ANALYZE_PROJECT: self._analyze_project,
+            IntentKind.CLI_COMMAND: self._cli_command,
         }
 
     # -- entry point ------------------------------------------------------------------------
@@ -164,10 +165,13 @@ class Orchestrator:
             inline.append(response.task_id)
         if inline:
             await svc.bus.drain()
+            from jarvis.core.awareness import mark_reported
             for task_id in inline:
                 task = svc.tasks.get_task(task_id)
                 if task is not None and (task.terminal or task.status == S.WAITING):
                     svc.notifications.acknowledge_task(task.id)   # already reported inline
+                    if task.terminal:
+                        mark_reported(svc, [task.id])
         if response.kind != "question" and self._may_deliver_queued(response.intent):
             delivered = svc.notifications.drain(limit=3)
             response.notifications = [n for n in delivered if n.title not in response.text]
@@ -342,7 +346,8 @@ class Orchestrator:
         recovered = self.svc.extra.get("recovery_reports") or []
         pending_recovery = [r for r in recovered if not r.resumed]
         if pending_recovery and all(r.summary not in text for r in pending_recovery):
-            text += " " + " ".join(r.summary for r in pending_recovery[:2]) + " Say 'continue' to resume."
+            extra = " ".join(r.summary for r in pending_recovery[:2])
+            text += " " + (extra if "'continue'" in extra else extra + " Say 'continue' to resume.")
         return self._reply(text, intent, provenance=[Provenance(ProvenanceKind.DATABASE, "tasks and events")])
 
     async def _briefing(self, intent: Intent) -> Response:
@@ -352,14 +357,27 @@ class Orchestrator:
 
     async def _away(self, intent: Intent) -> Response:
         """"What happened while I was away?" — from tasks, events, notifications and state only."""
-        from jarvis.core.awareness import away_report
+        from jarvis.core.awareness import away_report, mark_reported
         report = away_report(self.svc)
         self.last_changes_check = self.svc.clock.now()
         for task_id in report.reported_task_ids:
             self.svc.notifications.acknowledge_task(task_id)     # their results are in this answer
+        mark_reported(self.svc, [t["id"] for t in report.finished])
         return self._reply(report.text(), intent, data={"away": report.to_dict(), "format": "block"},
                            provenance=[Provenance(ProvenanceKind.DATABASE, "tasks, events and notifications"),
                                        Provenance(ProvenanceKind.SYSTEM_STATE, "runtime records")])
+
+    async def _cli_command(self, intent: Intent) -> Response:
+        """`py -m jarvis runtime stop` typed into the conversation: it belongs in a terminal. Running it from here
+        would run it on myself (and a stop would stop me in the middle of running it)."""
+        command = intent.params.get("command", intent.text)
+        text = (f"`{command}` is a command for Command Prompt (or a terminal), not something to say to me. If I ran "
+                "it, I'd be running it on myself. Type /quit, then run it there.")
+        if re.search(r"\bruntime\s+stop\b", command, re.IGNORECASE):
+            text += " (Closing this window doesn't stop me; that command does.)"
+        elif re.search(r"\bruntime\s+(status|health)\b", command, re.IGNORECASE):
+            text += " Or ask me here: \"status\" or \"are we good?\"."
+        return self._reply(text, intent)
 
     async def _analyze_project(self, intent: Intent) -> Response:
         """A durable task: measure the project, then have the model write the analysis from those facts."""

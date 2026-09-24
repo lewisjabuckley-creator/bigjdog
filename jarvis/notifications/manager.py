@@ -324,7 +324,8 @@ class NotificationManager:
             outcome = p.get("outcome")
             prio = NP.IMPORTANT if user_task else NP.INFORMATIONAL
             label = {"partial": "partly finished", "unknown": "finished (unverified)"}.get(outcome, "finished")
-            return prio, f"{_cap(title)} {label}", p.get("reason", ""), None
+            # what it produced says more than how it was verified
+            return prio, f"{_cap(title)} {label}", p.get("result") or p.get("reason", ""), None
         if t == EventType.TASK_FAILED:
             return (NP.URGENT if user_task else NP.IMPORTANT), f"{_cap(title)} failed", p.get("reason", ""), \
                 f"task-failed:{e.task_id}"

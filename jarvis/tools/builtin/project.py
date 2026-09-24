@@ -16,7 +16,7 @@ from typing import Any
 
 from jarvis.core.types import Provenance, ProvenanceKind
 from jarvis.permissions.model import PermissionLevel
-from jarvis.tools.base import Tool, ToolContext, ToolResult, ToolSpec
+from jarvis.tools.base import Tool, ToolContext, ToolResult, ToolSpec, Verification
 
 _SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "env", ".tox", ".mypy_cache",
               ".pytest_cache", ".ruff_cache", "dist", "build", "target", ".idea", ".vscode", ".next", ".cache",
@@ -138,3 +138,9 @@ class ProjectScanTool(Tool):
             return ToolResult(False, f"{root} is not a folder", error="not_found")
         scan = await asyncio.to_thread(scan_project, root, max_files=args["max_files"], cancel=ctx.cancel)
         return ToolResult(True, describe_scan(scan), scan, provenance=Provenance(ProvenanceKind.LOCAL_FILE, str(root)))
+
+    async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> Verification:
+        data = result.data if isinstance(result.data, dict) else {}
+        root = Path(data.get("root", ""))
+        passed = root.is_dir() and isinstance(data.get("files"), int)
+        return Verification(True, passed, "folder re-checked", f"{data.get('files', 0)} file(s) measured in {root}")

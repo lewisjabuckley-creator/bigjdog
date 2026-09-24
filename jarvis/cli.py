@@ -117,7 +117,7 @@ async def interactive_embedded(args: argparse.Namespace) -> int:
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
-            line = line.strip()
+            line = _clean_input(line)
             if not line:
                 continue
             if line.startswith("/"):
@@ -416,6 +416,11 @@ def format_health(health: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _clean_input(line: str) -> str:
+    """Drop control characters (Ctrl+A arrives as \\x01 and shows as ^A) and surrounding space."""
+    return "".join(ch for ch in line if ch.isprintable() or ch == "\t").strip()
+
+
 def _print_response(response: dict[str, Any], streamed_any: bool) -> None:
     if streamed_any and response.get("streamed"):
         print()
@@ -470,10 +475,11 @@ def _attach(client: Any, session: str, client_id: str | None = None) -> dict[str
     return client.post("/v1/sessions/attach", {"kind": "cli", "session": session, "client_id": client_id})
 
 
-def _returning_lines(att: dict[str, Any]) -> list[str]:
+def _returning_lines(att: dict[str, Any], skip: set[str] | None = None) -> list[str]:
     ret = att.get("returning")
     if not ret:
         return []
+    skip = skip or set()
     lines = []
     if ret.get("unclean_stops"):
         lines.append("While you were away JARVIS stopped unexpectedly and recovered.")
@@ -483,7 +489,7 @@ def _returning_lines(att: dict[str, Any]) -> list[str]:
     for text in ret.get("notifications") or []:
         if not any(t["title"] in text for t in finished):
             lines.append(f"● {text}")
-    waiting = ret.get("waiting") or []
+    waiting = [t for t in ret.get("waiting") or [] if t["id"] not in skip]     # recovery notes are shown above
     if waiting:
         lines.append("Waiting on you: " + "; ".join(f"{t['title']} ({t['reason'] or t['status']})"
                                                    for t in waiting[:3]) + ".")
@@ -509,9 +515,11 @@ def interactive_client(args: argparse.Namespace) -> int:
         "No language model is available, so I'm running on deterministic capabilities only."
     print(f"JARVIS {__version__}{label} — connected to the runtime (pid {att['runtime']['pid']}). {model} "
           + " ".join(att.get("model_issues") or []))
-    for line in (att.get("recovered") or []):
-        print(f"● {line} Say 'continue' to resume.")
-    for line in _returning_lines(att):
+    recovered = att.get("recovered") or []
+    for item in recovered:
+        summary = item["summary"] if isinstance(item, dict) else str(item)
+        print(f"● {summary}" + ("" if "'continue'" in summary else " Say 'continue' to resume."))
+    for line in _returning_lines(att, skip={item["id"] for item in recovered if isinstance(item, dict)}):
         print(line)
     print("Type 'help', or /quit to leave (JARVIS keeps running in the background).")
     stream = _NotificationStream(client, client_id, args.session, prompt)
@@ -523,7 +531,7 @@ def interactive_client(args: argparse.Namespace) -> int:
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
-            line = line.strip()
+            line = _clean_input(line)
             if not line:
                 continue
             if line.startswith("/"):

@@ -488,7 +488,9 @@ class ApiServer:
                             "version": __version__},
                 "model": readiness.summary() if readiness is not None and readiness.can_converse else None,
                 "model_issues": list(readiness.issues[:2]) if readiness is not None else [],
-                "recovered": [r.summary for r in recovered if not r.resumed][:3]}
+                "recovered": [{"id": r.task_id, "summary": r.summary} for r in recovered if not r.resumed
+                              and (t := svc.tasks.get_task(r.task_id)) is not None
+                              and t.status in (TaskStatus.PAUSED, TaskStatus.BLOCKED)][:3]}
 
     async def detach(self, req: Request) -> dict[str, Any]:
         client = str(req.json().get("client_id", ""))

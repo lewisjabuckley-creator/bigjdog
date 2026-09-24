@@ -263,9 +263,12 @@ class TaskManager:
             etype = _STATUS_EVENTS.get(status, EventType.TASK_STATUS_CHANGED)
             if old == TaskStatus.PAUSED and status == TaskStatus.QUEUED:
                 etype = EventType.TASK_RESUMED
-            self._emit(etype, task, {"title": task.title, "from": old.value, "to": status.value, "reason": reason,
-                                     "outcome": task.outcome.value if task.outcome else None, "by": by},
-                       _SEVERITY.get(status, Severity.INFO))
+            payload = {"title": task.title, "from": old.value, "to": status.value, "reason": reason,
+                       "outcome": task.outcome.value if task.outcome else None, "by": by}
+            if status == TaskStatus.COMPLETED and task.result:
+                preview = " ".join(task.result.split())
+                payload["result"] = preview if len(preview) <= 200 else preview[:199].rstrip() + "…"
+            self._emit(etype, task, payload, _SEVERITY.get(status, Severity.INFO))
         if status in (TaskStatus.QUEUED,):
             self._wake()
         return task

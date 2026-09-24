@@ -11,7 +11,7 @@ from typing import Any, Awaitable, Callable
 from jarvis.core.types import Priority, Provenance, ProvenanceKind
 from jarvis.memory.store import MemoryKind, MemoryStore
 from jarvis.permissions.model import PermissionLevel
-from jarvis.tools.base import Tool, ToolContext, ToolResult, ToolSpec
+from jarvis.tools.base import Tool, ToolContext, ToolResult, ToolSpec, Verification
 
 TaskStarter = Callable[[str, list[dict[str, Any]] | None, Priority, bool], Awaitable[dict[str, Any]]]
 StateReader = Callable[[str], dict[str, Any]]
@@ -158,3 +158,9 @@ class ModelReportTool(Tool):
         first = report.splitlines()[0][:160]
         return ToolResult(True, first, {"report": report, "model": routed.response.model},
                           provenance=Provenance(ProvenanceKind.INFERENCE, f"model {routed.response.model}"))
+
+    async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> Verification:
+        # what can be checked: a non-empty report came back from a model. Whether it is *right* is the reader's call.
+        report = (result.data or {}).get("report", "") if isinstance(result.data, dict) else ""
+        return Verification(True, bool(report.strip()), "report returned",
+                            f"{len(report)} characters from {(result.data or {}).get('model', 'the model')}")
