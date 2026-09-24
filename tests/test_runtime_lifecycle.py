@@ -662,3 +662,19 @@ async def test_the_away_answer_shows_the_newest_results_and_labels_the_catch_up(
 def test_reports_are_plain_text_for_the_terminal():
     from jarvis.tools.internal import plain_text
     assert plain_text("**Overview**\n## Next\n* a **b** c\n- d\n2*3 and a_b") == "Overview\nNext\n• a b c\n• d\n2*3 and a_b"
+
+
+async def test_queued_news_reaches_an_open_window_once_the_user_is_idle(tmp_path):
+    rt, _ = make_runtime(str(tmp_path), mode="daemon")
+    await rt.start()
+    try:
+        svc = rt.svc
+        shown = []
+        svc.notifications.sinks.append(shown.append)
+        svc.presence.attach("cli")
+        n = svc.notifications.notify(NotificationPriority.IMPORTANT, "Hello from JARVIS", source="test")
+        assert n.state == "queued" and not shown          # below the interrupt threshold: not pushed straight away
+        await wait_until(lambda: shown and shown[0].id == n.id, timeout=5)   # the heartbeat delivers it
+        assert n.state == "delivered"
+    finally:
+        await rt.stop()

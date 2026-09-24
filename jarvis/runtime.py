@@ -495,6 +495,10 @@ class Runtime:
         self._sample_self()
         if svc.presence is not None:
             svc.presence.expire()
+            if self.track_presence and not svc.presence.away:
+                # an interface is open and the user has been quiet for a while: a good moment for queued news
+                # (the interrupt policy holds back anything below its threshold until now)
+                svc.notifications.drain_if_idle(30.0)
         await self._resume_model_waiters()
 
     def _sample_self(self) -> None:

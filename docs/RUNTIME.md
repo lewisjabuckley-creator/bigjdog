@@ -55,6 +55,14 @@ interactive session start the runtime when needed.
 
 ## What happens when...
 
+**A notification is raised while a window is open.** Urgent and critical ones (a failure, an approval
+request, a security or critical resource problem) appear at your prompt straight away as a `●` line. Important
+ones (a task finished, a scheduled reminder, the briefing) appear under JARVIS's next answer, or at the prompt
+once you've been idle for about 30 seconds. Informational ones are only recorded. Focus, quiet and presentation
+modes hold back more. Repeats are merged ("failed 3 times in 10 minutes"), and at most 5 interruptions are
+shown per 10 minutes. `jarvis notifications` lists them with their state: `delivered` (shown), `queued`
+(waiting for you), `logged` (recorded only) or `acknowledged`. There are no desktop pop-ups yet.
+
 **You close the interface.** Nothing stops. The runtime notes that no interface is attached. From then on,
 notifications worth your attention are queued for your return instead of being "delivered" to nobody. When you
 open `jarvis` again it tells you what finished and what is waiting for you. Ask "What happened while I was away?"
