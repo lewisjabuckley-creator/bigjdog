@@ -21,6 +21,7 @@ class IntentKind(StrEnum):
     REENTRY = "reentry"
     BRIEFING = "briefing"
     WHAT_CHANGED = "what_changed"
+    AWAY = "away"
     DIAGNOSE = "diagnose"
     WHY = "why"
     WHAT_DID_YOU_DO = "what_did_you_do"
@@ -48,6 +49,7 @@ class IntentKind(StrEnum):
     BUILD = "build"
     SHELL = "shell"
     OPEN_PROJECT = "open_project"
+    ANALYZE_PROJECT = "analyze_project"
     REPEAT_FOR = "repeat_for"
     PRIORITY = "priority"
     TIME = "time"
@@ -117,6 +119,11 @@ rule(r"how far along (is|are) (?P<target>.+?)|how'?s the (?P<target2>.+?)( going
      IntentKind.STATUS,
      lambda m: {"target": next((g for g in (m.group("target"), m.group("target2"), m.group("target3"),
                                             m.group("target4")) if g), None)})
+_AWAY = r"while i was (away|gone|out|asleep|offline)|since i (left|closed you|was last here)"
+rule(rf"(so,? )?(what|anything) (happened|happen|went on|changed)( ?(,|-)? ?({_AWAY}))\??|"
+     rf"what did i miss( ({_AWAY}))?|what (did you do|have you (done|been doing|been up to))( ({_AWAY}))|"
+     rf"({_AWAY}),? what (happened|did i miss|did you do)|(any|what) news( ({_AWAY}))?|"
+     r"what have you been (doing|up to)|i'?m back|fill me in", IntentKind.AWAY)
 rule(r"where (were|are) we|where did we leave off|what are we (working on|doing)|catch me up|what was i doing",
      IntentKind.REENTRY)
 rule(r"(good )?morning|(daily |morning )?briefing|brief me|what'?s (on )?today|daily summary", IntentKind.BRIEFING)
@@ -192,6 +199,10 @@ rule(r"(run|execute) (the |all )?(unit |integration )?tests?( suite)?( for (?P<t
 rule(r"(build|compile) (it|the project|this|the (?P<target>.+?)( project)?)", IntentKind.BUILD, _t)
 rule(r"(run|execute)[: ]+`(?P<cmd>[^`]+)`|\$ ?(?P<cmd2>.+)|(run|execute) (the )?command:? (?P<cmd3>.+)",
      IntentKind.SHELL, lambda m: {"command": m.group("cmd") or m.group("cmd2") or m.group("cmd3")})
+_CODEBASE = r"(project|repo|repository|codebase|code ?base|code)"
+rule(rf"(analy[sz]e|review|audit|assess|summari[sz]e|give me an overview of|tell me about) (this|the|my|our) "
+     rf"{_CODEBASE}( (at|in) (?P<target>.+))?", IntentKind.ANALYZE_PROJECT, _t)
+rule(rf"(analy[sz]e|review|audit|assess) (the )?(?P<target>[\w.~/\\:-]+) {_CODEBASE}", IntentKind.ANALYZE_PROJECT, _t)
 rule(r"(open|switch to|load|work on) (the )?project (at |in )?(?P<target>.+)", IntentKind.OPEN_PROJECT, _t)
 rule(r"(open|switch to|load|work on) (the )?(?P<target>other one|.+?)( project)?", IntentKind.OPEN_PROJECT, _t)
 rule(r"do the same (thing )?for (the )?(?P<target>.+?)( project)?", IntentKind.REPEAT_FOR, _t)

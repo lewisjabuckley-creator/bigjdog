@@ -35,7 +35,7 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
                           S.QUEUED}),
     S.WAITING: frozenset({S.QUEUED, S.RUNNING, S.BLOCKED, S.PAUSED, S.FAILED, S.CANCELLED}),
     S.BLOCKED: frozenset({S.QUEUED, S.RUNNING, S.WAITING, S.PAUSED, S.FAILED, S.CANCELLED, S.ABANDONED}),
-    S.PAUSED: frozenset({S.QUEUED, S.CANCELLED, S.ABANDONED}),
+    S.PAUSED: frozenset({S.QUEUED, S.BLOCKED, S.CANCELLED, S.ABANDONED}),
     S.VERIFYING: frozenset({S.COMPLETED, S.FAILED, S.RUNNING, S.BLOCKED, S.PAUSED, S.CANCELLED, S.QUEUED}),
     S.FAILED: frozenset({S.QUEUED}),           # explicit user retry only
     S.COMPLETED: frozenset(),
@@ -84,6 +84,7 @@ class Step:
     started_at: float | None = None
     finished_at: float | None = None
     interrupted: bool = False
+    outcome_unknown: bool = False   # it was running when the process died: its effect may or may not have happened
     note: str = ""
 
     @property
@@ -130,7 +131,9 @@ class TaskPolicy:
     retry_backoff_s: float = 2.0
     on_step_failure: str = "replan"            # replan | fail | continue
     max_replans: int = 2
-    resume_after_restart: str = "ask"          # ask | auto (auto only honoured for idempotent steps)
+    # after a restart: "safe" resumes unless the interrupted step's outcome is unknown and repeating it could
+    # apply an effect twice; "ask" always waits for the user; "auto" is kept as an alias of "safe"
+    resume_after_restart: str = "safe"
     notify_on: list[str] = field(default_factory=lambda: ["completed", "failed", "blocked", "waiting"])
     notify_priority: str = "important"
     cancellable: bool = True
@@ -177,6 +180,12 @@ class Task:
     cwd: str | None = None
     dry_run: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
+    request: str = ""                          # the user's own words, when a request started the task
+    origin: str = ""                           # conversation:<session> | api | schedule:<id> | rule:<id> | system
+    artifacts: list[dict[str, Any]] = field(default_factory=list)   # files and reports the task produced
+    result: str = ""                           # the task's final result, in words
+    retry_count: int = 0
+    idempotency_key: str | None = None
     created_at: float = 0.0
     updated_at: float = 0.0
     started_at: float | None = None
@@ -216,6 +225,43 @@ class Task:
     def step(self, step_id: str) -> Step | None:
         return next((s for s in self.plan if s.id == step_id), None)
 
+    def failed_steps(self) -> list[Step]:
+        return [s for s in self.plan if s.status == StepStatus.FAILED]
+
+    @property
+    def error(self) -> str | None:
+        """The most recent error, if the task has one."""
+        if self.errors:
+            return str(self.errors[-1].get("error") or "") or None
+        return None
+
+    def to_api(self) -> dict[str, Any]:
+        """The task as the local API and interfaces see it."""
+        current = self.current_step
+
+        def brief(step: Step) -> dict[str, Any]:
+            return {"id": step.id, "description": step.description, "tool": step.tool, "status": step.status.value,
+                    "attempts": step.attempts, "error": step.error, "outcome_unknown": step.outcome_unknown}
+
+        return {
+            "id": self.id, "title": self.title, "request": self.request, "goal": self.objective,
+            "kind": self.kind.value, "status": self.status.value, "status_reason": self.status_reason,
+            "outcome": self.outcome.value if self.outcome else None, "priority": self.priority.name,
+            "progress": self.compute_progress() if self.plan else self.progress,
+            "origin": self.origin, "created_by": self.created_by, "owner": self.owner,
+            "project_id": self.project_id, "cwd": self.cwd,
+            "current_step": brief(current) if current else None,
+            "completed_steps": [brief(s) for s in self.completed_steps()],
+            "failed_steps": [brief(s) for s in self.failed_steps()],
+            "pending_steps": [brief(s) for s in self.pending_steps()],
+            "checkpoint": self.checkpoint, "retry_count": self.retry_count, "dependencies": self.dependencies,
+            "permissions": {"interactive": bool(self.authority.get("interactive")), "authority": self.authority},
+            "artifacts": self.artifacts, "result": self.result or self.outputs.get("summary", ""),
+            "error": self.error, "recovery": self.recovery, "deadline": self.deadline,
+            "created_at": self.created_at, "updated_at": self.updated_at, "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+
     # -- persistence ----------------------------------------------------------------
     def data_blob(self) -> dict[str, Any]:
         return {
@@ -236,6 +282,11 @@ class Task:
             "cwd": self.cwd,
             "dry_run": self.dry_run,
             "history": self.history[-100:],
+            "request": self.request,
+            "origin": self.origin,
+            "artifacts": self.artifacts[-50:],
+            "result": self.result,
+            "retry_count": self.retry_count,
         }
 
     @classmethod
@@ -255,6 +306,9 @@ class Task:
             checkpoint=data.get("checkpoint", {}), recovery=data.get("recovery", ""), control=data.get("control"),
             budget=data.get("budget", {}), usage=data.get("usage", {}), deadline=row["deadline"],
             cwd=data.get("cwd"), dry_run=data.get("dry_run", False), history=data.get("history", []),
+            request=data.get("request", ""), origin=data.get("origin", ""), artifacts=data.get("artifacts", []),
+            result=data.get("result", ""), retry_count=data.get("retry_count", 0),
+            idempotency_key=row["idempotency_key"] if "idempotency_key" in row.keys() else None,
             created_at=row["created_at"], updated_at=row["updated_at"], started_at=row["started_at"],
             finished_at=row["finished_at"], version=row["version"],
         )

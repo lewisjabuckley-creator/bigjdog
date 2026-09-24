@@ -239,4 +239,51 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        2,
+        """
+        ALTER TABLE tasks ADD COLUMN idempotency_key TEXT;
+        CREATE UNIQUE INDEX idx_tasks_idempotency ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+        ALTER TABLE automations ADD COLUMN last_status TEXT;
+        ALTER TABLE automations ADD COLUMN last_error TEXT;
+        ALTER TABLE automations ADD COLUMN last_task_id TEXT;
+        ALTER TABLE automations ADD COLUMN missed INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE runtime_runs (
+            id TEXT PRIMARY KEY,
+            pid INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            version TEXT,
+            host TEXT,
+            started_at REAL NOT NULL,
+            heartbeat_at REAL,
+            stopped_at REAL,
+            clean INTEGER NOT NULL DEFAULT 0,
+            info TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX idx_runtime_runs_started ON runtime_runs(started_at);
+
+        CREATE TABLE requests (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            status TEXT NOT NULL,
+            response TEXT,
+            created_at REAL NOT NULL,
+            finished_at REAL
+        );
+        CREATE INDEX idx_requests_session ON requests(session_id, created_at);
+
+        CREATE TABLE briefings (
+            id TEXT PRIMARY KEY,
+            ts REAL NOT NULL,
+            kind TEXT NOT NULL,
+            data TEXT NOT NULL,
+            text TEXT NOT NULL
+        );
+        CREATE INDEX idx_briefings_ts ON briefings(ts);
+        CREATE INDEX idx_conversation_session ON conversation(session_id, ts);
+        """,
+    ),
 ]

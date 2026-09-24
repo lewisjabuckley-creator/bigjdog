@@ -20,14 +20,26 @@ RESOURCE_MANAGER = "resource-manager"
 
 
 class ResourceManager:
+    POLICIES = ("pause", "slow", "wait", "continue")
+
     def __init__(self, state: StateEngine, *, clock: Clock | None = None, memory_critical: float = 92.0,
                  cpu_critical: float = 97.0, vram_critical: float = 90.0,
-                 mode_provider: Callable[[], str] | None = None) -> None:
+                 mode_provider: Callable[[], str] | None = None, low_priority_policy: str = "pause") -> None:
         self.state = state
         self.clock = clock or SystemClock()
         self.memory_critical = memory_critical
         self.cpu_critical = cpu_critical
         self.vram_critical = vram_critical
+        # what running P3+ work does under pressure (new P3+ work waits in every policy except "continue"):
+        #   pause    — checkpoint and pause it now; the interrupted step starts again when pressure clears
+        #   wait     — let the step in flight finish, then pause at the step boundary
+        #   slow     — keep one low-priority task running and pause the others now
+        #   continue — ignore pressure for low-priority work (the decision is still recorded)
+        # Work is never discarded: paused tasks keep their checkpoint and completed steps, and resume
+        # automatically when pressure clears.
+        if low_priority_policy not in self.POLICIES:
+            raise ValueError(f"unknown low-priority policy {low_priority_policy!r}")
+        self.low_priority_policy = low_priority_policy
         self.mode_provider = mode_provider or (lambda: "normal")
         self.locks: dict[str, str] = {}
         self.reasons: dict[str, OperationalReason] = {}
@@ -72,6 +84,10 @@ class ResourceManager:
         if task.priority <= Priority.P1 or task.kind == TaskKind.MONITOR:
             return True, ""
         constrained, why = self.pressure()
+        if constrained and self.low_priority_policy == "continue" and task.priority >= Priority.P3:
+            self.reasons[task.id] = OperationalReason(why, "the low-priority policy is 'continue'",
+                                                      "started the task anyway")
+            return True, ""
         if constrained:
             return self._defer(task, why, f"under resource pressure only P0-P2 work starts; this is {task.priority.name}",
                                "deferred the task")
@@ -101,16 +117,25 @@ class ResourceManager:
     def throttle(self, running: list[Task]) -> list[tuple[Task, OperationalReason]]:
         """Running work to pause because resources are constrained (lowest priority first)."""
         constrained, why = self.pressure()
-        if not constrained:
+        if not constrained or self.low_priority_policy == "continue":
             return []
+        low = sorted((t for t in running if t.priority >= Priority.P3 and t.kind != TaskKind.MONITOR
+                      and t.id not in self.throttled), key=lambda t: (-int(t.priority), -t.created_at))
+        if self.low_priority_policy == "slow":
+            still_running = [t for t in running if t.priority >= Priority.P3 and t.kind != TaskKind.MONITOR
+                             and t.id not in self.throttled]
+            if len(still_running) <= 1:
+                return []
+            low = low[:len(still_running) - 1]      # keep the oldest, highest-priority one going
         out = []
-        for task in sorted(running, key=lambda t: -int(t.priority)):
-            if task.priority >= Priority.P3 and task.kind != TaskKind.MONITOR and task.id not in self.throttled:
-                reason = OperationalReason(why, f"{task.priority.name} work yields under resource pressure",
-                                           f"paused '{task.title}'", "It resumes automatically when pressure clears.")
-                self.reasons[task.id] = reason
-                self.throttled.add(task.id)
-                out.append((task, reason))
+        for task in low:
+            rule = f"under pressure only one {task.priority.name}+ task keeps running" \
+                if self.low_priority_policy == "slow" else f"{task.priority.name} work yields under resource pressure"
+            reason = OperationalReason(why, rule, f"paused '{task.title}'",
+                                       "It resumes automatically when pressure clears.")
+            self.reasons[task.id] = reason
+            self.throttled.add(task.id)
+            out.append((task, reason))
         return out
 
     def resumable(self) -> list[str]:

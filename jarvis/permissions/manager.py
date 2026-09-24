@@ -147,6 +147,8 @@ class PermissionManager:
         subjects = {actor.subject, f"user:{actor.on_behalf_of}"} if actor.kind == "user" else {actor.subject}
         if task_id:
             subjects.add(f"task:{task_id}")
+        if actor.delegated_by and actor.delegated_by.startswith(("automation:", "agent:")):
+            subjects.add(actor.delegated_by)
         return subjects
 
     def _emit(self, etype: EventType, payload: dict, severity: Severity = Severity.INFO) -> None:

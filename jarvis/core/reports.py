@@ -17,7 +17,7 @@ import psutil
 from jarvis.clock import format_datetime, format_duration, format_time
 from jarvis.core.personality import join_clauses, percent, sentence
 from jarvis.core.services import Services
-from jarvis.core.types import Confidence, HealthStatus, NotificationPriority, Severity
+from jarvis.core.types import Confidence, NotificationPriority, Severity
 from jarvis.events.types import EventType
 from jarvis.tasks.models import EXECUTING, Task, TaskKind, TaskStatus
 
@@ -298,38 +298,9 @@ def what_changed(svc: Services, since: float | None = None) -> str:
 
 
 def briefing(svc: Services) -> str:
-    """Concise morning briefing (spec §62)."""
-    now = svc.clock.now()
-    local = time.localtime(now)
-    parts = [f"It's {time.strftime('%H:%M', local)} on {time.strftime('%A %d %B', local)}."]
-    since = last_seen(svc)
-    finished = svc.tasks.list_tasks([S.COMPLETED, S.FAILED], since=since, order="recent", limit=10)
-    failed = [t for t in finished if t.status == S.FAILED]
-    if finished:
-        text = f"{len(finished)} task{'s' if len(finished) != 1 else ''} finished since you were last here"
-        if failed:
-            text += f", {len(failed)} failed ({join_clauses([_label(t) for t in failed[:3]])})"
-        parts.append(sentence(text))
-    open_tasks = svc.tasks.open_tasks()
-    if open_tasks:
-        parts.append(activity(svc))
-    overall = svc.health.overall()
-    if overall == HealthStatus.HEALTHY:
-        parts.append("All systems are healthy.")
-    else:
-        parts.append(sentence(f"System health is {overall.label}: " +
-                              join_clauses([f"{c.name} {c.status.label}" for c in svc.health.unhealthy()[:3]])))
-    warnings = svc.events.query(since=since, min_severity=Severity.WARNING,
-                                types=[EventType.RESOURCE_THRESHOLD_EXCEEDED, EventType.PREDICTIVE_WARNING,
-                                       EventType.SECURITY_EVENT, EventType.TREND_DETECTED], limit=3)
-    for e in warnings:
-        parts.append(sentence(_event_text(e)))
-    project = svc.projects.active()
-    if project:
-        parts.append(f"Active project: {project.name}.")
-    upcoming = svc.automations.upcoming(limit=3) if svc.automations else []
-    if upcoming:
-        parts.append(sentence("Scheduled: " + join_clauses([f"{a.name} at {format_time(a.next_run)}" for a in upcoming])))
+    """Concise morning briefing (spec §62), rendered from the same data the scheduled briefing stores."""
+    from jarvis.core.awareness import briefing_data, render_briefing
+    parts = [render_briefing(briefing_data(svc, since=last_seen(svc)))]
     pending = svc.notifications.drain(limit=5)
     if pending:
         parts.append("Updates: " + "; ".join(n.text() for n in pending) + ".")

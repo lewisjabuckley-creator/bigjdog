@@ -13,6 +13,10 @@ class EventType(StrEnum):
     # lifecycle
     SYSTEM_STARTED = "SYSTEM_STARTED"
     SYSTEM_STOPPING = "SYSTEM_STOPPING"
+    SYSTEM_STOPPED = "SYSTEM_STOPPED"
+    SYSTEM_RECOVERED = "SYSTEM_RECOVERED"         # started again after an unclean stop (crash, kill, power loss)
+    UI_ATTACHED = "UI_ATTACHED"                   # an interface connected to the runtime
+    UI_DETACHED = "UI_DETACHED"                   # the last interface went away: the user is away
     SUBSYSTEM_DEGRADED = "SUBSYSTEM_DEGRADED"
     SUBSYSTEM_RECOVERED = "SUBSYSTEM_RECOVERED"
     HEALTH_CHANGED = "HEALTH_CHANGED"
@@ -26,6 +30,7 @@ class EventType(StrEnum):
     MODEL_RECOVERED = "MODEL_RECOVERED"
     MODEL_FALLBACK = "MODEL_FALLBACK"
     MODEL_RESPONSE_READY = "MODEL_RESPONSE_READY"
+    MODEL_REQUEST_FAILED = "MODEL_REQUEST_FAILED"
     # filesystem / processes / devices / network
     FILE_CREATED = "FILE_CREATED"
     FILE_CHANGED = "FILE_CHANGED"
@@ -57,6 +62,7 @@ class EventType(StrEnum):
     TASK_FAILED = "TASK_FAILED"
     TASK_CANCELLED = "TASK_CANCELLED"
     TASK_INTERRUPTED = "TASK_INTERRUPTED"
+    TASK_RECOVERED = "TASK_RECOVERED"             # the restart-recovery decision for an interrupted task
     TASK_STATUS_CHANGED = "TASK_STATUS_CHANGED"
     DEADLINE_AT_RISK = "DEADLINE_AT_RISK"
     MONITOR_TRIGGERED = "MONITOR_TRIGGERED"
@@ -81,12 +87,16 @@ class EventType(StrEnum):
     # automation / communications
     TIMER_EXPIRED = "TIMER_EXPIRED"
     AUTOMATION_TRIGGERED = "AUTOMATION_TRIGGERED"
+    SCHEDULE_MISSED = "SCHEDULE_MISSED"           # a scheduled run fell outside the catch-up window
+    BRIEFING_READY = "BRIEFING_READY"
     CALL_RECEIVED = "CALL_RECEIVED"
     MESSAGE_RECEIVED = "MESSAGE_RECEIVED"
     BUILD_COMPLETED = "BUILD_COMPLETED"
     DEPLOYMENT_COMPLETED = "DEPLOYMENT_COMPLETED"
     TEST_FAILED = "TEST_FAILED"
     NOTIFICATION = "NOTIFICATION"
+    NOTIFICATION_CREATED = "NOTIFICATION_CREATED"
+    NOTIFICATION_ACKNOWLEDGED = "NOTIFICATION_ACKNOWLEDGED"
 
 
 # High-frequency events that are useful live but not worth persisting by default.

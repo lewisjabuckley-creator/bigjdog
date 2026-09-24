@@ -15,7 +15,7 @@ from typing import Iterable
 from jarvis.audit.log import AuditLog
 from jarvis.clock import Clock, SystemClock
 from jarvis.config import TasksConfig
-from jarvis.core.types import HealthStatus, Priority, Severity
+from jarvis.core.types import HealthStatus, Outcome, Priority, Severity
 from jarvis.events.bus import EventBus
 from jarvis.events.types import Event, EventType
 from jarvis.log import get_logger
@@ -23,7 +23,7 @@ from jarvis.permissions.hierarchy import InstructionSource
 from jarvis.state.health import HealthRegistry
 from jarvis.tasks.executor import TaskExecutor
 from jarvis.tasks.manager import TaskController, TaskManager
-from jarvis.tasks.models import TERMINAL, Task, TaskKind, TaskStatus
+from jarvis.tasks.models import TERMINAL, StepStatus, Task, TaskKind, TaskStatus
 from jarvis.tasks.resources import RESOURCE_MANAGER, ResourceManager
 
 log = get_logger("workers")
@@ -155,25 +155,50 @@ class WorkerPool:
             return await self.executor.run(task, controller)
         except Exception as exc:
             log.error("task_crashed", task_id=task.id, error=repr(exc))
-            current = self.manager.get_task(task.id) or task
-            if not current.terminal:
-                current.errors.append({"ts": self.clock.now(), "error": repr(exc), "step": None})
-                current.outputs["summary"] = f"internal error: {exc}"
-                try:
-                    self.manager.transition(current, TaskStatus.FAILED, f"internal error: {exc}")
-                except Exception:
-                    self.manager.save(current)
-            return current
+            return self._crashed(task, exc)
         finally:
             self.running.pop(task.id, None)
             self.manager.controllers.pop(task.id, None)
             self.resources.release(task)
             self.kick()
 
+    def _crashed(self, task: Task, exc: Exception) -> Task:
+        """The executor itself failed. A step that was mid-flight has an unknown outcome: it may or may not have
+        taken effect, so the task is blocked for review rather than reported as failed (or done)."""
+        current = self.manager.get_task(task.id) or task
+        if current.terminal:
+            return current
+        current.plan = task.plan            # the worker's copy is newer than the last checkpoint
+        in_flight = next((s for s in current.plan if s.status == StepStatus.RUNNING), None)
+        current.errors.append({"ts": self.clock.now(), "error": repr(exc),
+                               "step": in_flight.description if in_flight else None})
+        try:
+            if in_flight is not None:
+                in_flight.status = StepStatus.PENDING
+                in_flight.interrupted = True
+                in_flight.outcome_unknown = True
+                in_flight.note = f"outcome unknown: internal error while it ran ({exc})"
+                reason = (f"internal error while running '{in_flight.description}' ({exc}); its outcome is unknown, "
+                          "so it was not repeated. Say 'continue' to run it again, or cancel the task")
+                current.outputs["summary"] = reason
+                self.manager.checkpoint_task(current, "internal error: step outcome unknown")
+                self.manager.transition(current, TaskStatus.BLOCKED, reason, outcome=Outcome.UNKNOWN)
+            else:
+                current.outputs["summary"] = f"internal error: {exc}"
+                self.manager.transition(current, TaskStatus.FAILED, f"internal error: {exc}")
+        except Exception:
+            self.manager.save(current)
+        if self.audit:
+            self.audit.record(actor="system:workers", action="task_crashed", task_id=current.id,
+                              summary=current.status_reason, ok=False)
+        return current
+
     def _throttle(self, running: list[Task]) -> None:
         for task, reason in self.resources.throttle(running):
+            # "wait": the step in flight finishes before the task pauses
             result = self.manager.pause_task(task.id, by=RESOURCE_MANAGER, source=InstructionSource.DEFAULT,
-                                             reason=reason.sentence())
+                                             reason=reason.sentence(),
+                                             at_step_boundary=self.resources.low_priority_policy == "wait")
             if result.ok:
                 if self.audit:
                     self.audit.record(actor=f"system:{RESOURCE_MANAGER}", action="pause_task", task_id=task.id,

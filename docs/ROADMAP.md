@@ -13,12 +13,12 @@ covered by tests. "Partial" means the architecture and a working subset exist.
 | 6. Autonomy (planner, verification, recovery, agents, proactive notifications) | **Done (v1)** | Templates plus validated LLM planning, bounded replanning, supervised agents, interrupt policy, emergency mode. |
 | 7. Interface (dashboard, HUD, voice, visualisation, screen awareness) | **Partial** | CLI with status block, activity, events, debug view. No GUI, voice or screen awareness yet. |
 | 8. Advanced integration (communications, external APIs, smart devices, robotics, telemetry) | **Interfaces only** | Device contract with telemetry verification and a simulated device; call/message event types and notification rules. No real integrations. |
+| Repository Phase 2: persistent, always-on runtime | **Done (Linux-tested)** | Background runtime with a local authenticated API; the CLI is a client; work continues when the interface closes; restart recovery with validation and unknown outcomes; durable scheduler; presence-aware notifications; "what happened while I was away?"; briefing data; unified health; live state including JARVIS's own cost; resource policy; model waiting. macOS and Windows adapters are written but untested. See [RUNTIME.md](RUNTIME.md) and [PHASE2.md](PHASE2.md). |
 
 ## Next, in order
 
-1. **Background daemon plus local API.** Run the runtime as a user service (systemd, launchd) and expose a local,
-   authenticated API (Unix socket or localhost HTTP with a token) for state, tasks, events (streaming),
-   approvals and conversation. The CLI becomes a client. Tasks then keep running when the terminal closes.
+1. **Verify the runtime on Windows and macOS**, and exercise the generated systemd, launchd and Startup-folder
+   definitions. Add approval decisions to the API (today they go through the conversation: "proceed" / "no").
 2. **Web dashboard / HUD.** A local page on top of the API: activity centre (§47), task graph and timeline,
    resource charts from `TrendTracker`, model status, approvals queue, event stream, and dependency-chain
    visualisations from `WorldModel.chain`. Adaptive panels per mode (§126-127).
@@ -47,7 +47,13 @@ covered by tests. "Partial" means the architecture and a working subset exist.
 
 ## Known limitations
 
-- Tasks execute only while the runtime is running (see item 1). They are recovered on the next start.
+- Tasks execute only while the runtime process is running. It now runs in the background and survives closing
+  the interface, but it does not start at login unless you install the service definition
+  (`jarvis runtime install-service`). Interrupted work is recovered on the next start.
+- After a crash, a command that was running as a child process may still be running as an orphan; recovery marks
+  its step's outcome as unknown but does not yet look for or stop the orphan.
+- Planning a task from scratch while no model is available still fails (as before); only steps that need a model
+  inside an existing plan wait for one.
 - Path monitors poll (every 5 s) and are capped at 5,000 files.
 - GPU telemetry covers NVIDIA via `nvidia-smi` only.
 - The network probe is a TCP connect to a configurable host, which may not reflect captive portals.

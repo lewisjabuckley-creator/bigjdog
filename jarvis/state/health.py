@@ -46,6 +46,7 @@ class HealthRegistry:
     clock: Clock = field(default_factory=SystemClock)
     components: dict[str, ComponentHealth] = field(default_factory=dict)
     outages: deque[Outage] = field(default_factory=lambda: deque(maxlen=200))
+    last_overall: HealthStatus | None = None
 
     def register(self, name: str, *, critical: bool = False, heartbeat_timeout_s: float | None = None) -> None:
         if name not in self.components:
@@ -78,6 +79,22 @@ class HealthRegistry:
                 outage.ended = now
             self._emit(EventType.SUBSYSTEM_RECOVERED, name, status, detail, Severity.INFO,
                        duration=outage.duration if outage else None)
+        self._check_overall()
+
+    def _check_overall(self) -> None:
+        """Publish HEALTH_CHANGED only when the overall state changes (never once per sample)."""
+        overall = self.overall()
+        previous, self.last_overall = self.last_overall, overall
+        if previous is None or previous == overall or self.bus is None:
+            return
+        if previous == HealthStatus.UNKNOWN and overall == HealthStatus.HEALTHY:
+            return      # components finishing their first check (e.g. at startup) is not news
+        severity = Severity.INFO if overall <= HealthStatus.HEALTHY else \
+            Severity.ERROR if overall >= HealthStatus.CRITICAL else Severity.WARNING
+        self.bus.emit(Event(EventType.HEALTH_CHANGED, "health",
+                            {"from": previous.label, "to": overall.label,
+                             "unhealthy": [f"{c.name} {c.status.label}" for c in self.unhealthy()][:6]},
+                            severity=severity))
 
     def heartbeat(self, name: str) -> None:
         comp = self.components.get(name)

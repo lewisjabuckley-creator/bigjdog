@@ -106,3 +106,55 @@ class LiveStateTool(Tool):
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(True, f"live state: {args['section']}", self.reader(args["section"]),
                           provenance=Provenance(ProvenanceKind.SYSTEM_STATE, "live state"))
+
+
+_REPORT_SYSTEM = (
+    "You are JARVIS writing a report for your user. Use only the material provided: it was measured by JARVIS's "
+    "own tools. Do not invent files, numbers or features that are not in it; if something cannot be determined "
+    "from the material, say so. Be concise and concrete: a short overview, then the notable points as a short "
+    "list, then suggested next steps. Plain text, no preamble.")
+
+
+class ModelReportTool(Tool):
+    """Turn material gathered by earlier steps into a written report, using the language model.
+
+    If no model is available the step reports ``model_unavailable`` and the task waits for one instead of
+    failing (it resumes automatically when a model provider comes back)."""
+
+    spec = ToolSpec(
+        name="model_report",
+        description="Write a report with the language model from material gathered by earlier task steps.",
+        parameters={"type": "object", "properties": {
+            "instruction": {"type": "string"},
+            "material": {"description": "text or data produced by earlier steps"},
+        }, "required": ["instruction", "material"]},
+        level=PermissionLevel.OBSERVE, idempotent=True, verification="non-empty report returned", timeout_s=1200.0,
+        category="jarvis",
+    )
+
+    def __init__(self, router: Any) -> None:
+        self.router = router
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        import json
+
+        from jarvis.models.base import ChatMessage, ModelError, Purpose
+        from jarvis.models.ollama import strip_thinking
+        from jarvis.models.router import TaskProfile
+
+        material = args["material"]
+        text = material if isinstance(material, str) else json.dumps(material, indent=1, default=str)
+        messages = [ChatMessage("system", _REPORT_SYSTEM),
+                    ChatMessage("user", f"{args['instruction']}\n\nMaterial:\n{text[:24000]}")]
+        try:
+            routed = await self.router.chat(TaskProfile(purpose=Purpose.SUMMARIZATION, complexity="high",
+                                                        interactive=False), messages)
+        except ModelError as exc:
+            return ToolResult(False, f"no language model is available to write the report ({exc})",
+                              error="model_unavailable")
+        report = strip_thinking(routed.response.content or "").strip()
+        if not report:
+            return ToolResult(False, f"{routed.response.model} returned an empty report", error="empty_report")
+        first = report.splitlines()[0][:160]
+        return ToolResult(True, first, {"report": report, "model": routed.response.model},
+                          provenance=Provenance(ProvenanceKind.INFERENCE, f"model {routed.response.model}"))

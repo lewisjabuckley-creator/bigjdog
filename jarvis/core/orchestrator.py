@@ -63,6 +63,15 @@ class Response:
     streamed: bool = False                 # the answer text was already shown token by token
     footnote: str = ""                     # e.g. a model fallback note
 
+    def to_dict(self) -> dict[str, Any]:
+        """The response as interfaces receive it over the local API."""
+        return {"text": self.text, "intent": self.intent.value, "kind": self.kind, "task_id": self.task_id,
+                "approval_id": self.approval_id, "provenance": [p.to_dict() for p in self.provenance],
+                "notifications": [{"id": n.id, "text": n.text(), "priority": n.priority.name.lower()}
+                                  for n in self.notifications],
+                "model": self.model, "data": self.data, "streamed": self.streamed, "footnote": self.footnote,
+                "rendered": self.render(), "extra": self.render(include_text=False)}
+
     def render(self, *, include_text: bool = True) -> str:
         parts = []
         if include_text:
@@ -91,6 +100,8 @@ class Orchestrator:
         self.last_changes_check: float | None = None
         self._inline_tasks: list[str] = []      # tasks whose outcome is reported in the current reply
         self._token_sink: Callable[[str], None] | None = None
+        self.client_cwd: str | None = None      # the interface's working folder (the runtime may run elsewhere)
+        self._current_text = ""
         self._register_internal_tools()
         self.handlers: dict[IntentKind, Handler] = {
             IntentKind.STATUS: self._status, IntentKind.REENTRY: self._reentry, IntentKind.BRIEFING: self._briefing,
@@ -108,13 +119,18 @@ class Orchestrator:
             IntentKind.SHELL: self._shell, IntentKind.OPEN_PROJECT: self._open_project,
             IntentKind.REPEAT_FOR: self._repeat_for, IntentKind.TIME: self._time, IntentKind.SELF: self._self,
             IntentKind.HELP: self._help, IntentKind.SHORTER: self._shorter, IntentKind.LONGER: self._longer,
-            IntentKind.CHAT: self._chat,
+            IntentKind.CHAT: self._chat, IntentKind.AWAY: self._away, IntentKind.ANALYZE_PROJECT: self._analyze_project,
         }
 
     # -- entry point ------------------------------------------------------------------------
-    async def handle(self, text: str, *, on_token: Callable[[str], None] | None = None) -> Response:
+    async def handle(self, text: str, *, on_token: Callable[[str], None] | None = None,
+                     cwd: str | None = None) -> Response:
         """Handle one user turn. ``on_token`` receives model answer text as it streams (interfaces may show it
-        live); deterministic answers are returned whole."""
+        live); deterministic answers are returned whole. ``cwd`` is the interface's working folder, which is
+        what "this project" and relative paths mean to the user."""
+        if cwd and os.path.isdir(cwd):
+            self.client_cwd = cwd
+        self._current_text = text
         previous_activity = self.svc.notifications.user_activity
         self.svc.notifications.set_activity("conversing")
         self._token_sink = on_token
@@ -162,6 +178,14 @@ class Orchestrator:
         svc.state.set("session.last_seen", svc.clock.now())
         self._record("assistant", response.text, {"intent": response.intent.value, "model": response.model})
         return response
+
+    def restore_history(self, limit: int = 40) -> int:
+        """Continue this session's conversation after a restart or from another interface."""
+        rows = self.svc.db.query("SELECT role, content FROM conversation WHERE session_id=? "
+                                 "ORDER BY ts DESC, rowid DESC LIMIT ?", (self.session_id, limit))
+        self.history = [ChatMessage("user" if r["role"] == "user" else "assistant", r["content"])
+                        for r in reversed(rows)]
+        return len(self.history)
 
     def _may_deliver_queued(self, kind: IntentKind) -> bool:
         if kind in (IntentKind.STATUS, IntentKind.BRIEFING, IntentKind.REENTRY, IntentKind.WHAT_CHANGED):
@@ -238,13 +262,17 @@ class Orchestrator:
         if project and project.root:
             return project.root
         paths = self.svc.permissions.paths
-        for candidate in (os.getcwd(), os.path.expanduser("~")):
+        for candidate in (self._launch_dir(), os.path.expanduser("~")):
             if paths.check(os.path.realpath(candidate))[0]:
                 return candidate
         for root in paths.roots():                     # otherwise the first allowed folder that exists
             if os.path.isdir(root) and paths.check(root)[0]:
                 return root
-        return os.getcwd()
+        return self._launch_dir()
+
+    def _launch_dir(self) -> str:
+        """The folder the user is working in: the interface's, else this process's."""
+        return self.client_cwd if self.client_cwd and os.path.isdir(self.client_cwd) else os.getcwd()
 
     def _project_for(self, target: str | None) -> tuple[Project | None, list[Project]]:
         if target:
@@ -258,7 +286,7 @@ class Orchestrator:
         active = self.svc.projects.active()
         if active:
             return active, []
-        cwd = os.getcwd()
+        cwd = self._launch_dir()
         probe = probe_project(cwd)
         if probe.test_command or probe.markers:
             return self.svc.projects.discover(cwd), []
@@ -275,7 +303,8 @@ class Orchestrator:
                                           owner=self.svc.user, project_id=project.id if project else None,
                                           outputs={"template": template} if template else None,
                                           dependencies=dependencies, policy=policy,
-                                          authority={"interactive": True})
+                                          authority={"interactive": True}, request=self._current_text,
+                                          origin=f"conversation:{self.session_id}")
         self.focus.touch_task(task.id)
         return task
 
@@ -320,6 +349,40 @@ class Orchestrator:
         return self._reply(reports.briefing(self.svc), intent,
                            provenance=[Provenance(ProvenanceKind.SYSTEM_STATE, "live state"),
                                        Provenance(ProvenanceKind.DATABASE, "tasks and events")])
+
+    async def _away(self, intent: Intent) -> Response:
+        """"What happened while I was away?" — from tasks, events, notifications and state only."""
+        from jarvis.core.awareness import away_report
+        report = away_report(self.svc)
+        self.last_changes_check = self.svc.clock.now()
+        for task_id in report.reported_task_ids:
+            self.svc.notifications.acknowledge_task(task_id)     # their results are in this answer
+        return self._reply(report.text(), intent, data={"away": report.to_dict(), "format": "block"},
+                           provenance=[Provenance(ProvenanceKind.DATABASE, "tasks, events and notifications"),
+                                       Provenance(ProvenanceKind.SYSTEM_STATE, "runtime records")])
+
+    async def _analyze_project(self, intent: Intent) -> Response:
+        """A durable task: measure the project, then have the model write the analysis from those facts."""
+        resolved = self._resolved_project(intent)
+        project, candidates = (resolved, []) if resolved else self._project_for(intent.target)
+        if candidates:
+            return self._ask("Which project should I analyze? " + "; ".join(
+                f"{i + 1}) {p.name}" for i, p in enumerate(candidates)), intent, candidates, "project")
+        if project is None and intent.target:
+            return self._reply(f"I can't find a project called '{intent.target}'. Open it first (\"open the project "
+                               "<folder>\") or run me from its folder.", intent)
+        root = project.root if project and project.root else self._launch_dir()
+        name = project.name if project else os.path.basename(root.rstrip(os.sep)) or root
+        steps = [Step(f"scan {name}", "project_scan", {"path": root}),
+                 Step("write the analysis", "model_report",
+                      {"instruction": f"Analyze the software project '{name}' for its owner: what it is, how it is "
+                                      "built, its size and structure, how it is tested, and notable risks or gaps.",
+                       "material": {"$from_step": 0}})]
+        task = self._user_task(f"Analyze the {name} project", steps=steps, title=f"Analyze {name}", cwd=root,
+                               project=project)
+        return self._reply(f"Analyzing {name} in the background (task {task.id}). It keeps running if you close "
+                           "this window; I'll tell you when the analysis is ready.", intent, task_id=task.id,
+                           provenance=[Provenance(ProvenanceKind.DATABASE, "task manager")])
 
     async def _what_changed(self, intent: Intent) -> Response:
         since = self.last_changes_check or self.session_since

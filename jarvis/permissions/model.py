@@ -35,6 +35,9 @@ class Actor:
     id: str
     on_behalf_of: str = "owner"
     interactive: bool = False
+    # the automation or agent whose work this is (a task it created): grants made to that subject apply,
+    # and nothing more — a scheduled task never borrows the user's authority
+    delegated_by: str | None = None
 
     @property
     def subject(self) -> str:

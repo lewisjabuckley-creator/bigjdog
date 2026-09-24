@@ -30,14 +30,19 @@ py -m jarvis          (Windows)
 python3 -m jarvis     (macOS / Linux)
 ```
 
-The first line tells you what it found, for example:
+The first time, this starts the JARVIS runtime in the background ("Starting the JARVIS runtime in the
+background…"). The first line tells you what it found, for example:
 
 ```text
-JARVIS 0.1.0 — Ready. Talking through llama3.1:8b (local, tools enabled).
+JARVIS 0.2.0 — connected to the runtime (pid 4120). Talking through llama3.1:8b (local, tools enabled).
 ```
 
 If Ollama isn't running, or no model is installed, JARVIS tells you exactly what to do. Everything that doesn't
-need a model still works in the meantime. JARVIS reconnects on its own once Ollama is up.
+need a model still works in the meantime. JARVIS reconnects on its own once Ollama is up, and a background task
+that needs the model waits for it instead of failing.
+
+When you leave (`/quit` or closing the window), the runtime keeps going: tasks finish, and the results are waiting
+when you come back. `jarvis runtime stop` stops it; [RUNTIME.md](RUNTIME.md) has the details.
 
 ## 3. Check the whole chain
 
@@ -74,6 +79,8 @@ Anything conversational now goes to the model, which can use JARVIS's tools:
 - "Delete shopping.txt." (JARVIS asks for approval first; answer `proceed` or `no`)
 - "Run `ping -n 20 127.0.0.1` in the background and tell me when it's done."
 - "Remember that my dentist appointment is on Friday at 3pm", then later "When is my dentist appointment?"
+- "Analyze this project." (from a project folder), close the window, come back later and ask "What happened
+  while I was away?"
 
 The deterministic commands from the README (`status`, `what are you doing?`, `stop`, `continue`, `focus mode`...)
 keep working exactly as before and answer instantly.

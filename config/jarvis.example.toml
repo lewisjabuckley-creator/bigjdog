@@ -88,3 +88,28 @@ allow_cloud = false             # optional cloud adapters are opt-in
 verbosity = "normal"            # short | normal | detailed
 use_sir = false
 humor = true
+
+# -- the persistent runtime (docs/RUNTIME.md) ---------------------------------------------------------
+[runtime]
+api_host = "127.0.0.1"          # loopback only; the API is never exposed to the network
+api_port = 0                    # 0 = any free port (written to runtime.json in the data directory)
+heartbeat_s = 10
+presence_timeout_s = 30         # an interface silent this long counts as closed
+auto_start = true               # `jarvis` starts the runtime in the background when it isn't running
+recovery_max_age_s = 86400      # interrupted work older than this waits for you instead of resuming
+
+[scheduler]
+tick_s = 5
+catch_up_window_s = 21600       # runs missed while JARVIS was down are made up once if this recent
+
+[resources]
+memory_critical = 92            # percent; above this only P0-P2 work starts
+cpu_critical = 97
+vram_critical = 90
+low_priority_policy = "pause"   # pause | wait (finish the current step first) | slow (one keeps going) | continue
+self_memory_warn_mb = 1500      # warn when JARVIS itself uses this much memory
+
+[briefing]
+enabled = false                 # prepare a morning briefing on a schedule
+time = "07:30"
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]

@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from jarvis.config import JarvisConfig
     from jarvis.core.emergency import EmergencyController
     from jarvis.core.modes import ModeManager
+    from jarvis.core.presence import Presence
     from jarvis.database.db import Database
     from jarvis.devices.registry import DeviceRegistry
     from jarvis.events.bus import EventBus
@@ -61,6 +62,7 @@ class Services:
     devices: "DeviceRegistry"
     metrics: "MetricsSource"
     monitoring: "MonitoringService | None" = None
+    presence: "Presence | None" = None
     user: str = "owner"
     simulated: bool = False
     extra: dict[str, Any] = field(default_factory=dict)

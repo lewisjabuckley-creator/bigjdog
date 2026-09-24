@@ -7,8 +7,10 @@ monitoring, running tasks, enforcing permissions, answering status questions and
 
 ```text
                       USER
-                        │  (CLI today; voice / HUD clients later)
+                        │  (CLI today; voice / HUD clients later) — clients only, see "Process model"
                         ▼
+                 Local API (loopback HTTP, token)  ── jarvis/service/
+                        │
                 ┌───────────────┐
                 │ Orchestrator  │  intent → context → state → authority → decide → verify → respond
                 └──────┬────────┘
@@ -32,6 +34,32 @@ monitoring, running tasks, enforcing permissions, answering status questions and
          ▼
    Live state (facts with provenance, TTL) · World model (entities, relations) · Memory · Decisions
 ```
+
+## Process model
+
+JARVIS runs as one persistent background process per data directory, the **runtime**, and interfaces are its
+clients (docs/RUNTIME.md). `jarvis/runtime.py` holds the single `Runtime` class. `jarvis/service/daemon.py`
+hosts it with the local API (`service/api.py`, a stdlib-asyncio HTTP server on 127.0.0.1 with a bearer token).
+The CLI uses `service/client.py`, which finds the runtime through `runtime.json` in the data directory and starts
+it if needed. `jarvis --embedded` runs the same `Runtime` in-process.
+
+- **Single instance.** `Runtime.start()` takes an OS file lock (`platforms/`). A second runtime on the same
+  database, which would schedule the same queued tasks twice, refuses to start.
+- **Run records.** `runtime_runs` stores each run's pid, heartbeat and clean-stop flag. A run without a clean stop
+  means the process died: the next start publishes `SYSTEM_RECOVERED` and treats in-flight steps as having
+  unknown outcomes.
+- **Own loops.** Besides the worker pool, the runtime runs a scheduler loop, a heartbeat (run record, core
+  health checks, JARVIS's own CPU and memory, presence expiry, resuming tasks that wait for a model) and
+  maintenance (retention). None of them depends on monitoring being enabled or on an interface being attached.
+- **Presence** (`core/presence.py`): attached interfaces, and when the user left (persisted). While nobody is
+  attached, the notification policy queues news instead of "delivering" it to nobody.
+- **Awareness** (`core/awareness.py`): "What happened while I was away?" and the morning briefing, assembled only
+  from tasks, events, notifications and run records.
+- **Conversation turns** (`service/conversations.py`) run inside the runtime with a client-chosen request id, so
+  a closed window never cancels a turn and a retried request is never handled twice. Session history is restored
+  from the conversation log.
+- **Health and live state** (`service/status.py`): one health check across runtime, database, task engine,
+  workers, scheduler, event bus, monitoring, model layer and Ollama, and one live-state snapshot.
 
 ## Runtime loops
 
@@ -117,9 +145,21 @@ QUEUED → PLANNING → RUNNING → VERIFYING → COMPLETED
 - `WorkerPool` admits `QUEUED` work by priority, dependencies (a failed dependency blocks dependants), the
   concurrency limit, resource locks and pressure. It throttles P3+ under pressure, resumes it when pressure
   clears, and warns about deadlines at risk.
-- `recover_interrupted()` runs at startup. Monitors resume automatically. Other tasks resume automatically only
-  if their policy allows it and the interrupted step is idempotent. Everything else is paused with a summary
-  ("interrupted during 'validation'; completed: schema migration").
+- `recover_interrupted()` runs at startup. Each interrupted task is validated (working folder, dependencies, the
+  automation that created it, age). The step that was in flight when the process stopped has an **unknown
+  outcome** and is repeated automatically only if it is safe to repeat (an idempotent tool, or a call whose
+  assessed level is observe). Otherwise it is marked `outcome_unknown` and the task is paused for the user. The
+  decision (resumed, paused or blocked) is written to the task, the audit log and a `TASK_RECOVERED` event.
+  Monitors resume. A summary explains it ("interrupted during 'validation'; completed: schema migration; I
+  haven't resumed it: ... can't tell whether it finished").
+- A crash of the executor itself leaves the task `BLOCKED` with outcome `unknown`, never `FAILED` or `COMPLETED`.
+- Task records carry the original request, origin (`conversation:<session>`, `api`, `schedule:<id>`...),
+  artifacts, a final result, a retry count and an optional idempotency key (unique), and `Task.to_api()` exposes
+  current, completed and failed steps, checkpoint, permissions and the last error.
+- A step that needs a language model when none is reachable (`model_report`) puts the task in `WAITING`
+  (`checkpoint.waiting_for = "model"`). It resumes when a provider recovers.
+- Under resource pressure, P3+ work follows `resources.low_priority_policy`: pause, wait (finish the current
+  step first), slow (one keeps running) or continue.
 
 ### Planning and verification (`planner/`, `verification/`)
 Deterministic templates handle common intents (run tests, build) by probing the project for Python, Node, Rust,
@@ -184,22 +224,31 @@ notifications ("Deployment failed. health check returned 503").
   with reasoning traces and filler openers filtered out on the way.
 
 ### Everything else
-- `automation/`: schedules (`every_s`, `daily_at`) and `WHEN/IF/DO` rules. They run with automation authority,
-  cannot trigger on their own work, and are rate-limited.
+- `automation/`: the durable scheduler (once, daily, weekly and interval schedules, with one run per slot through
+  idempotency keys, catch-up within a window, and missed runs recorded and reported), `WHEN/IF/DO` rules and the
+  `task`, `notify` and `briefing` actions. They run with automation authority. A grant to `automation:<id>`
+  covers only the tasks that automation created (`Actor.delegated_by`). They cannot trigger on their own work and
+  are rate-limited.
+- `platforms/`: per-OS process start/stop, file locks and start-at-login definitions (Linux tested; macOS and
+  Windows written but untested).
 - `agents/`: bounded specialist agents with tool allowlists, a permission ceiling, budgets and a structured
   output contract. No recursive delegation, capped concurrency, and claims treated as evidence.
 - `devices/`: the STATE/COMMAND/RESULT/TELEMETRY contract. Commands are verified from telemetry, never assumed.
 - `security/`: `secret://` references resolved only inside tools; redaction of keys and known token formats in
   logs, audit records and events.
-- `runtime.py`: startup (config, DB, events, state restore, task recovery, model detection, workers, monitors,
-  subsystem verification, a concise report) and shutdown (checkpoint and mark interrupted work, stop monitors
-  and workers, close resources).
+- `runtime.py`: startup (instance lock, config, DB, events, state restore, run record and unclean-stop detection,
+  task recovery, model detection, workers, scheduler, heartbeat, monitors, subsystem verification, a concise
+  report) and shutdown (checkpoint and mark interrupted work, stop loops, monitors and workers, record a clean
+  stop, close resources, release the lock). A *passive* start (read-only CLI commands while no runtime is
+  running) skips workers, scheduler, recovery and the run record.
 
 ## Data (SQLite, `database/schema.py`)
 
 `events`, `state`, `entities`, `relations`, `tasks`, `approvals`, `grants`, `audit`, `memories` (+ `memories_fts`,
 `embeddings`), `decisions` (+ `decisions_fts`), `projects`, `notifications`, `automations`, `conversation`,
-`users`. WAL mode, one connection guarded by a re-entrant lock, versioned migrations.
+`users`; since schema v2 also `runtime_runs`, `requests` (conversation turn idempotency), `briefings`, a unique
+`tasks.idempotency_key` and schedule state columns on `automations`. WAL mode, one connection guarded by a
+re-entrant lock, versioned migrations (an existing v1 database is upgraded in place).
 
 ## Extending JARVIS
 
@@ -220,10 +269,16 @@ audit.
 
 ## Testing layers
 
-1. **Unit and subsystem tests** (`tests/test_*.py`): in-process, deterministic, about 10 s.
-2. **Acceptance scenarios** (`tests/test_scenarios.py`): the full runtime with a simulated model, metrics and
+1. **Unit and subsystem tests** (`tests/test_*.py`): in-process, deterministic. Phase 2 adds
+   `test_runtime_lifecycle.py` (lock, run records, recovery decisions, unknown outcomes, health, presence,
+   notifications, model waiting, resource policies, briefing), `test_scheduler.py` and `test_api.py`.
+2. **Process-level tests** (`tests/test_daemon_process.py`, POSIX): the real background runtime through the CLI:
+   start, status, single instance, clean stop, closing the interface mid-task, `kill -9` mid-step, SIGTERM.
+3. **Acceptance scenarios** (`tests/test_scenarios.py`): the full runtime with a simulated model, metrics and
    network, exercising the twenty scenarios in spec §200.
-3. **Live integration** (`tests/integration/`, opt-in with `JARVIS_OLLAMA_TESTS=1`): a real Ollama server.
+4. **Live integration** (`tests/integration/`, opt-in with `JARVIS_OLLAMA_TESTS=1`): a real Ollama server.
+   `test_live_runtime.py` covers the persistent runtime against it: health and model state, a task waiting
+   through an Ollama outage, and the Phase 2 acceptance scenario through real processes.
    *Puppet* models (`tests/integration/puppet.py`) are tiny GGUF files with hand-set weights: one-hot
    embeddings, zeroed attention and feed-forward, and a lookup-table output layer. They make the real server emit
    scripted replies, such as a specific `<tool_call>`, so the assertions are exact while the server does real

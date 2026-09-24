@@ -84,6 +84,12 @@ class ModelRouter:
         self.last_refresh: float | None = None
         self.calls = 0
         self.tokens = {"prompt": 0, "completion": 0}
+        # operational state for health and "what is JARVIS doing" (never prompts or answers)
+        self.active: dict[str, dict[str, Any]] = {}
+        self.last_success: dict[str, Any] | None = None
+        self.last_failure: dict[str, Any] | None = None
+        self.last_fallback: dict[str, Any] | None = None
+        self._request_seq = 0
 
     # -- inventory ----------------------------------------------------------------
     async def refresh(self) -> list[ModelInfo]:
@@ -232,6 +238,7 @@ class ModelRouter:
             provider_name, model = queue.pop(0)
             tried += 1
             provider = self.providers[provider_name]
+            request = self._begin(provider_name, model, profile, stream=False)
             try:
                 response = await provider.chat(model, messages, tools=tools, format=format, options=options,
                                                timeout=timeout)
@@ -242,12 +249,16 @@ class ModelRouter:
                     # the whole provider is down; skip its other models
                     queue = [o for o in queue if o[0] != provider_name]
                 continue
+            finally:
+                self._end(request)
             self._record_success(provider_name, model)
             self.calls += 1
             self.tokens["prompt"] += response.prompt_tokens or 0
             self.tokens["completion"] += response.completion_tokens or 0
             used_fallback = (provider_name, model) != (decision.provider, decision.model)
             if used_fallback:
+                self.last_fallback = {"intended": decision.model, "used": model, "ts": self.clock.now(),
+                                      "attempts": attempts[-3:]}
                 self._emit(EventType.MODEL_FALLBACK, {"intended": decision.model, "used": model,
                                                       "attempts": attempts}, Severity.WARNING)
             return RoutedResponse(response, decision, used_fallback, attempts)
@@ -269,6 +280,7 @@ class ModelRouter:
                      tools: list[dict[str, Any]] | None = None) -> AsyncIterator[ChatChunk]:
         decision = await self._decide(profile)
         provider = self.providers[decision.provider]
+        request = self._begin(decision.provider, decision.model, profile, stream=True)
         try:
             async for chunk in provider.stream_chat(decision.model, messages, tools=tools):
                 if chunk.done and chunk.response is not None:
@@ -280,6 +292,8 @@ class ModelRouter:
         except ModelError as exc:
             self._record_failure(decision.provider, decision.model, exc)
             raise
+        finally:
+            self._end(request)
 
     async def embed(self, texts: list[str]) -> tuple[list[list[float]], str] | None:
         try:
@@ -329,6 +343,43 @@ class ModelRouter:
             except Exception:
                 pass
 
+    # -- request tracking --------------------------------------------------------------
+    def _begin(self, provider: str, model: str, profile: TaskProfile, *, stream: bool) -> str:
+        self._request_seq += 1
+        rid = f"req{self._request_seq}"
+        self.active[rid] = {"id": rid, "provider": provider, "model": model, "purpose": profile.purpose.value,
+                            "interactive": profile.interactive, "stream": stream, "started_at": self.clock.now()}
+        return rid
+
+    def _end(self, request_id: str) -> None:
+        self.active.pop(request_id, None)
+
+    def status(self) -> dict[str, Any]:
+        """The model layer as health reports and interfaces see it."""
+        conversation = None
+        for needs_tools in (True, False):      # conversations use tools when a model supports them
+            try:
+                conversation = self.select(TaskProfile(purpose=Purpose.CONVERSATION, interactive=True,
+                                                       needs_tools=needs_tools)).model
+                break
+            except NoModelAvailable:
+                continue
+        now = self.clock.now()
+        return {
+            "providers": dict(self.provider_status),
+            "models": [m.name for m in self.inventory],
+            "loaded": [m.name for m in self.inventory if m.loaded],
+            "conversation_model": conversation,
+            "pins": dict(self.pins),
+            "active_requests": [{**r, "elapsed_s": round(now - r["started_at"], 1)} for r in self.active.values()],
+            "last_success": self.last_success,
+            "last_failure": self.last_failure,
+            "last_fallback": self.last_fallback,
+            "calls": self.calls,
+            "tokens": dict(self.tokens),
+            "last_refresh": self.last_refresh,
+        }
+
     # -- health tracking ------------------------------------------------------------
     def _health(self, m: ModelInfo) -> _ModelHealth:
         return self._model_health.setdefault((m.provider, m.name), _ModelHealth())
@@ -338,6 +389,10 @@ class ModelRouter:
         h.failures += 1
         h.last_error = str(exc)
         log.warning("model_call_failed", provider=provider, model=model, error=str(exc), failures=h.failures)
+        self.last_failure = {"provider": provider, "model": model, "error": str(exc)[:300], "ts": self.clock.now(),
+                             "kind": type(exc).__name__}
+        self._emit(EventType.MODEL_REQUEST_FAILED, {"provider": provider, "model": model, "error": str(exc)[:300],
+                                                    "consecutive_failures": h.failures}, Severity.WARNING)
         if isinstance(exc, ModelUnavailable):
             if self.provider_status.get(provider, True):
                 self.provider_status[provider] = False
@@ -353,6 +408,7 @@ class ModelRouter:
         h = self._model_health.setdefault((provider, model), _ModelHealth())
         h.failures = 0
         h.unhealthy_until = 0.0
+        self.last_success = {"provider": provider, "model": model, "ts": self.clock.now()}
 
     def _report(self, provider: str, status: HealthStatus, detail: str) -> None:
         if self.health is not None:

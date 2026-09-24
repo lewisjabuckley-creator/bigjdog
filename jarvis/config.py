@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import tomllib
 import typing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 class ConfigError(ValueError):
@@ -176,6 +180,41 @@ class UIConfig:
 
 
 @dataclass
+class RuntimeConfig:
+    """The persistent runtime and its local API (docs/RUNTIME.md)."""
+    api_host: str = "127.0.0.1"         # loopback only: the API is never exposed to the network
+    api_port: int = 0                   # 0 = any free port; the chosen port is written to runtime.json
+    heartbeat_s: float = 10.0
+    presence_timeout_s: float = 30.0    # an interface silent for this long counts as closed
+    auto_start: bool = True             # the CLI starts the runtime in the background when it isn't running
+    recovery_max_age_s: float = 86400.0 # interrupted work older than this waits for the user instead of resuming
+
+
+@dataclass
+class SchedulerConfig:
+    tick_s: float = 5.0
+    catch_up_window_s: float = 21600.0  # a run missed while JARVIS was down is made up if it is this recent
+
+
+@dataclass
+class ResourcesConfig:
+    memory_critical: float = 92.0       # percent; above this only P0-P2 work starts
+    cpu_critical: float = 97.0
+    vram_critical: float = 90.0
+    # what happens to running P3+ work under pressure: pause (checkpoint, resume automatically), slow (keep
+    # running but start nothing new below P2), wait (finish the current step, then pause), continue
+    low_priority_policy: str = "pause"
+    self_memory_warn_mb: float = 1500.0 # JARVIS's own resident memory that is worth a warning
+
+
+@dataclass
+class BriefingConfig:
+    enabled: bool = False               # prepare a morning briefing on a schedule
+    time: str = "07:30"
+    days: list[str] = field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])
+
+
+@dataclass
 class JarvisConfig:
     general: GeneralConfig = field(default_factory=GeneralConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
@@ -187,6 +226,10 @@ class JarvisConfig:
     events: EventsConfig = field(default_factory=EventsConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    resources: ResourcesConfig = field(default_factory=ResourcesConfig)
+    briefing: BriefingConfig = field(default_factory=BriefingConfig)
     source: str = "defaults"
 
     @property
@@ -327,6 +370,15 @@ def validate(cfg: JarvisConfig) -> None:
         raise ConfigError("ui.verbosity must be short, normal or detailed")
     if cfg.tasks.max_concurrent < 1:
         raise ConfigError("tasks.max_concurrent must be >= 1")
+    if cfg.runtime.api_host not in ("127.0.0.1", "localhost", "::1"):
+        raise ConfigError("runtime.api_host must be a loopback address (127.0.0.1, localhost or ::1)")
+    if cfg.resources.low_priority_policy not in ("pause", "slow", "wait", "continue"):
+        raise ConfigError("resources.low_priority_policy must be pause, slow, wait or continue")
+    if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", cfg.briefing.time):
+        raise ConfigError("briefing.time must be HH:MM")
+    bad_days = [d for d in cfg.briefing.days if d.lower()[:3] not in WEEKDAYS]
+    if bad_days:
+        raise ConfigError(f"briefing.days: unknown day(s) {', '.join(bad_days)}")
 
 
 def find_config_file(env: dict[str, str] | None = None) -> Path | None:

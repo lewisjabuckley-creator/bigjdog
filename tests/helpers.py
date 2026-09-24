@@ -70,3 +70,34 @@ def build_engine(root: str, db: Database | None = None, clock: Clock | None = No
                       bus=bus, clock=clock, health=health, audit=audit)
     return Engine(db, bus, state, permissions, approvals, audit, registry, tasks, resources, executor, pool,
                   provider, router, health)
+
+
+# -- a full runtime (Phase 2 tests) -------------------------------------------------------------------
+
+def runtime_config(tmp: str, **overrides):
+    from jarvis.config import config_from_dict
+    data = {"general": {"data_dir": f"{tmp}/data"}, "monitoring": {"enabled": False},
+            "permissions": {"allowed_roots": [tmp]}, "tasks": {"scheduler_interval_s": 0.02},
+            "scheduler": {"tick_s": 0.05}, "runtime": {"heartbeat_s": 0.1}}
+    for section, values in overrides.items():
+        data.setdefault(section, {}).update(values)
+    return config_from_dict(data)
+
+
+def make_runtime(tmp: str, *, mode: str = "embedded", sim=None, clock=None, **overrides):
+    from jarvis.runtime import Runtime
+    from jarvis.simulation.environment import SimulatedEnvironment
+    sim = sim or SimulatedEnvironment()
+    rt = Runtime(runtime_config(tmp, **overrides), providers=[sim.provider], metrics=sim.metrics,
+                 network_probe=sim.probe, simulated=True, mode=mode, clock=clock)
+    return rt, sim
+
+
+async def wait_until(predicate, timeout: float = 10.0, interval: float = 0.02):
+    import asyncio
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise TimeoutError("condition not met in time")
+        await asyncio.sleep(interval)

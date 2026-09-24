@@ -10,6 +10,8 @@ explicit user command.
 from __future__ import annotations
 
 import asyncio
+import os
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -50,6 +52,7 @@ class TaskController:
     reason: str = ""
     runner: asyncio.Task[Any] | None = None
     edits: list[Callable[[Task], None]] = field(default_factory=list)
+    pause_after_step: str | None = None  # pause at the next step boundary (the running step finishes first)
 
     def request(self, intent: str, reason: str = "") -> None:
         self.intent = intent
@@ -76,6 +79,8 @@ class RecoveryReport:
     title: str
     summary: str
     resumed: bool
+    decision: str = ""              # resumed | paused | blocked
+    outcome_unknown: bool = False   # the step in flight may or may not have taken effect
 
 
 class TaskManager:
@@ -104,7 +109,15 @@ class TaskManager:
                     success_condition: dict[str, Any] | None = None, policy: TaskPolicy | None = None,
                     monitor: MonitorSpec | None = None, deadline: float | None = None, cwd: str | None = None,
                     dry_run: bool = False, authority: dict[str, Any] | None = None,
-                    outputs: dict[str, Any] | None = None, budget: dict[str, Any] | None = None) -> Task:
+                    outputs: dict[str, Any] | None = None, budget: dict[str, Any] | None = None,
+                    request: str = "", origin: str = "", idempotency_key: str | None = None) -> Task:
+        """Create a durable task. With an ``idempotency_key`` a repeated request (a client retrying after a
+        dropped connection, a scheduler slot fired twice) returns the task that already exists instead of
+        creating a second one."""
+        if idempotency_key:
+            existing = self.find_by_key(idempotency_key)
+            if existing is not None:
+                return existing
         now = self.clock.now()
         interactive = created_by == "user" or created_by.startswith("user:")
         task = Task(objective=objective, title=title, kind=kind, owner=owner, created_by=created_by,
@@ -113,18 +126,25 @@ class TaskManager:
                     success_condition=success_condition, policy=policy or TaskPolicy(), monitor=monitor,
                     deadline=deadline, cwd=cwd, dry_run=dry_run,
                     authority=authority or {"interactive": interactive}, outputs=dict(outputs or {}),
-                    created_at=now, updated_at=now)
+                    request=request, origin=origin or ("conversation" if interactive else created_by),
+                    idempotency_key=idempotency_key, created_at=now, updated_at=now)
         if budget:
             task.budget.update(budget)
         task.history.append({"ts": now, "from": None, "to": task.status.value, "reason": "created", "by": created_by})
-        self.db.execute(
-            "INSERT INTO tasks(id, kind, title, objective, owner, created_by, priority, status, status_reason, outcome, "
-            "progress, project_id, parent_id, data, deadline, created_at, updated_at, started_at, finished_at, version) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
-            (task.id, task.kind.value, task.title, task.objective, task.owner, task.created_by, int(task.priority),
-             task.status.value, task.status_reason, None, 0.0, task.project_id, task.parent_id,
-             dumps(task.data_blob()), task.deadline, now, now, None, None),
-        )
+        try:
+            self.db.execute(
+                "INSERT INTO tasks(id, kind, title, objective, owner, created_by, priority, status, status_reason, "
+                "outcome, progress, project_id, parent_id, data, deadline, created_at, updated_at, started_at, "
+                "finished_at, version, idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+                (task.id, task.kind.value, task.title, task.objective, task.owner, task.created_by, int(task.priority),
+                 task.status.value, task.status_reason, None, 0.0, task.project_id, task.parent_id,
+                 dumps(task.data_blob()), task.deadline, now, now, None, None, idempotency_key),
+            )
+        except sqlite3.IntegrityError:
+            existing = self.find_by_key(idempotency_key) if idempotency_key else None
+            if existing is None:
+                raise
+            return existing
         if self.world is not None:
             self.world.upsert_entity("task", task.title, {"status": task.status.value, "kind": task.kind.value},
                                      id=f"task:{task.id}", source="tasks")
@@ -163,6 +183,10 @@ class TaskManager:
                     "created": "created_at ASC"}[order]
         rows = self.db.query(f"SELECT * FROM tasks {where} ORDER BY {order_by} LIMIT ?", (*params, limit))
         return [Task.from_row(r, loads(r["data"], {})) for r in rows]
+
+    def find_by_key(self, idempotency_key: str) -> Task | None:
+        row = self.db.query_one("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
+        return Task.from_row(row, loads(row["data"], {})) if row else None
 
     def open_tasks(self) -> list[Task]:
         return self.list_tasks(OPEN)
@@ -254,7 +278,7 @@ class TaskManager:
         return Directive.from_dict(task.control) if task.control else None
 
     def pause_task(self, task_id: str, *, by: str = "user", source: InstructionSource = InstructionSource.USER,
-                   reason: str = "") -> ControlResult:
+                   reason: str = "", at_step_boundary: bool = False) -> ControlResult:
         task = self.get_task(task_id)
         if task is None:
             return ControlResult(False, "no such task")
@@ -269,6 +293,9 @@ class TaskManager:
         controller = self.controllers.get(task_id)
         if controller and task.status in EXECUTING:
             self.save(task)
+            if at_step_boundary:
+                controller.pause_after_step = reason   # the step in flight is not interrupted
+                return ControlResult(True, f"pausing {task.title} after its current step", task)
             controller.request("pause", reason)   # the worker checkpoints and transitions
             return ControlResult(True, f"pausing {task.title}", task)
         self.transition(task, TaskStatus.PAUSED, reason, by=by)
@@ -294,6 +321,10 @@ class TaskManager:
             if step.status == StepStatus.RUNNING:
                 step.status = StepStatus.PENDING
             step.interrupted = False
+            if step.outcome_unknown and not step.finished:
+                # an explicit decision to run a step whose earlier attempt has an unknown outcome
+                step.outcome_unknown = False
+                step.note = f"re-run at the request of {by} after an unknown outcome"
         self.transition(task, TaskStatus.QUEUED, reason or f"resumed by {by}", by=by)
         return ControlResult(True, f"resumed {task.title}", task)
 
@@ -334,6 +365,7 @@ class TaskManager:
                 step.attempts = 0
                 step.error = None
         task.outcome = None
+        task.retry_count += 1
         task.control = self._directive("resume", by, InstructionSource.USER).to_dict()
         task.control_dirty = True
         self.transition(task, TaskStatus.QUEUED, f"retry requested by {by}", by=by)
@@ -396,46 +428,125 @@ class TaskManager:
         return ControlResult(True, f"added {len(steps)} step(s) to {task.title}", task)
 
     # -- recovery -----------------------------------------------------------------------
-    def recover_interrupted(self, idempotent: Callable[[str | None], bool]) -> list[RecoveryReport]:
+    def recover_interrupted(self, idempotent: Callable[[str | None], bool], *,
+                            safe_to_repeat: Callable[[Step], bool] | None = None, max_age_s: float | None = None,
+                            automation_state: Callable[[str], bool | None] | None = None,
+                            audit: Any = None) -> list[RecoveryReport]:
         """After a restart, reconcile tasks that were executing when the process stopped (spec §155).
 
-        Monitors resume automatically (they only observe). Other tasks resume automatically only if
-        their policy allows it and the interrupted step is idempotent; otherwise they are paused with
-        a summary so nothing destructive is silently re-run.
+        For each interrupted task: restore its checkpoint, validate it (age, working folder, dependencies, the
+        automation that created it), decide whether the step that was in flight is safe to repeat, then resume
+        it, pause it for the user, or block it, and record the decision (task history, audit, events).
+
+        A step that was running when the process stopped has an unknown outcome: it may or may not have taken
+        effect. It is repeated automatically only if doing so is safe (idempotent or read-only); otherwise the
+        task waits for the user. Completed steps are never re-run. Monitors resume (they only observe).
         """
+        repeatable = safe_to_repeat or (lambda step: idempotent(step.tool))
+        now = self.clock.now()
         reports = []
         candidates = self.list_tasks(list(EXECUTING) + [TaskStatus.PAUSED])
         for task in candidates:
             if task.status == TaskStatus.PAUSED and not task.checkpoint.get("interrupted"):
                 continue
-            interrupted = next((s for s in task.plan if s.status == StepStatus.RUNNING), None) or task.current_step
+            crashed = task.status in EXECUTING          # no shutdown checkpoint: the process died
+            in_flight = next((s for s in task.plan if s.status == StepStatus.RUNNING), None) or \
+                next((s for s in task.plan if s.interrupted and not s.finished), None)
+            where_step = in_flight or task.current_step
             done = [s.description for s in task.completed_steps()]
             pending = [s.description for s in task.pending_steps()]
             for step in task.plan:
                 if step.status == StepStatus.RUNNING:
                     step.status = StepStatus.PENDING
                     step.interrupted = True
-            auto = task.kind == TaskKind.MONITOR or (
-                task.policy.resume_after_restart == "auto" and (interrupted is None or idempotent(interrupted.tool)))
-            where = f" during '{interrupted.description}'" if interrupted else ""
+            where = f" during '{where_step.description}'" if where_step else ""
             summary = f"{task.title} was interrupted{where}."
             if done:
                 summary += f" Completed: {', '.join(done)}."
             if pending:
                 summary += f" Pending: {', '.join(pending)}."
+
+            # -- validate ------------------------------------------------------------------
+            problem: str | None = None
+            hold: str | None = None
+            if task.cwd and not os.path.isdir(task.cwd):
+                problem = f"its working folder {task.cwd} no longer exists"
+            for dep_id in task.dependencies:
+                dep = self.get_task(dep_id)
+                if dep is None or dep.status in (TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.ABANDONED):
+                    problem = problem or f"its dependency '{dep.title if dep else dep_id}' " \
+                                         f"{'is missing' if dep is None else dep.status.value}"
+            if task.created_by.startswith("automation:") and automation_state is not None:
+                enabled = automation_state(task.created_by.split(":", 1)[1])
+                if not enabled:
+                    hold = "the automation that created it is " + ("disabled" if enabled is False else "gone")
+            age = now - (task.updated_at or now)
+            if max_age_s is not None and age > max_age_s and task.kind != TaskKind.MONITOR:
+                hold = hold or f"it was interrupted {int(age // 3600)} hours ago"
+
+            # -- decide ----------------------------------------------------------------------
+            unknown = in_flight is not None and in_flight.tool is not None and not repeatable(in_flight)
+            if unknown:
+                in_flight.outcome_unknown = True
+                in_flight.note = "outcome unknown: it was running when JARVIS stopped"
+            policy = task.policy.resume_after_restart
+            if task.kind == TaskKind.MONITOR:
+                decision, why = ("blocked", problem) if problem else ("resumed", "monitors only observe")
+            elif problem:
+                decision, why = "blocked", problem
+            elif unknown:
+                decision = "paused"
+                why = (f"'{in_flight.description}' was running when JARVIS stopped, so I can't tell whether it "
+                       "finished, and repeating it could apply it twice")
+            elif hold:
+                decision, why = "paused", hold
+            elif policy == "ask":
+                decision, why = "paused", "its policy is to ask before resuming after a restart"
+            else:
+                decision = "resumed"
+                why = f"'{in_flight.description}' is safe to repeat" if in_flight else \
+                    "no step was in flight when JARVIS stopped"
+            if decision == "resumed" and task.kind != TaskKind.MONITOR:
+                summary += f" I resumed it because {why}."
+            elif decision == "paused":
+                summary += f" I haven't resumed it: {why}. Say 'continue' to resume."
+            elif decision == "blocked":
+                summary += f" It is blocked: {why}."
             task.recovery = summary
             task.checkpoint["interrupted"] = False
+            task.checkpoint["recovered_at"] = now
+            task.checkpoint["recovery_decision"] = decision
             if task.status in EXECUTING:
                 # force through the state machine: EXECUTING -> PAUSED
-                self.transition(task, TaskStatus.PAUSED, "interrupted by restart", by="system")
+                self.transition(task, TaskStatus.PAUSED, "interrupted by restart" if crashed
+                                else "interrupted by shutdown", by="system")
             else:
                 self.save(task)
             self._emit(EventType.TASK_INTERRUPTED, task, {"title": task.title, "summary": summary}, Severity.WARNING)
-            if auto:
+            if decision == "resumed":
                 task.control = None
                 task.control_dirty = True
                 self.transition(task, TaskStatus.QUEUED, "resumed after restart", by="system")
-            reports.append(RecoveryReport(task.id, task.title, summary, auto))
+            elif decision == "blocked":
+                self.transition(task, TaskStatus.BLOCKED, why or "blocked after restart", by="system")
+            else:
+                task.status_reason = f"interrupted by restart: {why}"
+                self.save(task)
+            self._emit(EventType.TASK_RECOVERED, task,
+                       {"title": task.title, "decision": decision, "reason": why, "crashed": crashed,
+                        "step": in_flight.description if in_flight else None, "outcome_unknown": unknown},
+                       Severity.WARNING if decision != "resumed" else Severity.INFO)
+            if audit is not None:
+                audit.record(actor="system:recovery", action="recovery_decision", task_id=task.id,
+                             summary=summary, outcome="unknown" if unknown else None,
+                             reason={"condition": f"'{task.title}' was interrupted"
+                                                  f"{' by a crash' if crashed else ' by a shutdown'}{where}",
+                                     "rule": "never repeat a step with an unknown outcome unless it is safe to "
+                                             "repeat; validate before resuming",
+                                     "action": {"resumed": "resumed the task", "paused": "paused it for you",
+                                                "blocked": "blocked it"}[decision],
+                                     "expected": why or ""})
+            reports.append(RecoveryReport(task.id, task.title, summary, decision == "resumed", decision, unknown))
         return reports
 
     def mark_interrupted(self, task: Task, reason: str = "interrupted: shutdown") -> None:

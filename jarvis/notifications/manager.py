@@ -63,6 +63,32 @@ class NotificationManager:
         self._recent_interrupts: list[float] = []
         self._by_key: dict[str, Notification] = {}
         self._queue: dict[str, Notification] = {}
+        # True while no interface is attached (set by the runtime's presence tracking): nothing can be shown,
+        # so news is queued for the user's return instead of being "delivered" to nobody
+        self.away: Callable[[], bool] = lambda: False
+
+    def restore(self) -> int:
+        """Reload the queue and the dedupe index after a restart, so queued news is not lost and a problem that
+        was already reported is counted as a repeat instead of announced as new."""
+        now = self.clock.now()
+        rows = self.db.query("SELECT * FROM notifications WHERE state='queued' OR "
+                             "(dedupe_key IS NOT NULL AND state != 'acknowledged' AND ts >= ?) ORDER BY ts",
+                             (now - self.config.dedupe_window_s,))
+        restored = 0
+        for r in rows:
+            n = Notification(r["id"], NotificationPriority(r["priority"]), r["title"], r["body"] or "", r["source"] or "",
+                             r["task_id"], r["dedupe_key"], r["count"], r["state"], r["ts"], r["ts"], r["expires_at"],
+                             r["delivered_at"], r["acknowledged_at"])
+            if n.state == "queued":
+                if n.expires_at and n.expires_at < now:
+                    n.state = "expired"
+                    self._persist(n)
+                    continue
+                self._queue[n.id] = n
+                restored += 1
+            if n.dedupe_key:
+                self._by_key[n.dedupe_key] = n
+        return restored
 
     # -- attention ------------------------------------------------------------------
     def on_user_input(self) -> None:
@@ -82,6 +108,9 @@ class NotificationManager:
     def decide(self, n: Notification) -> str:
         if n.priority <= NP.DEBUG:
             return "logged"
+        if self.away():
+            # no interface is open: keep anything worth telling for the user's return
+            return "logged" if n.priority == NP.INFORMATIONAL else "queued"
         if n.priority == NP.CRITICAL:
             return "delivered"
         policy = self.modes.effective().policy
@@ -124,6 +153,10 @@ class NotificationManager:
         if dedupe_key:
             self._by_key[dedupe_key] = n
         self._route(n)
+        if self.bus is not None and n.priority > NP.DEBUG:
+            self.bus.emit(Event(EventType.NOTIFICATION_CREATED, "notifications",
+                                {"id": n.id, "priority": n.priority.name.lower(), "title": redact_text(n.title),
+                                 "state": n.state}, task_id=task_id))
         return n
 
     def _route(self, n: Notification) -> None:
@@ -191,12 +224,57 @@ class NotificationManager:
         now = self.clock.now()
         targets = [n for n in self._by_key.values() if notification_id in (None, n.id)]
         targets += [n for n in self._queue.values() if notification_id in (None, n.id) and n not in targets]
+        if notification_id is not None and not targets:
+            row = self.db.query_one("SELECT * FROM notifications WHERE id=? AND state != 'acknowledged'",
+                                    (notification_id,))
+            if row is not None:     # e.g. delivered before a restart: not in memory any more
+                self.db.execute("UPDATE notifications SET state='acknowledged', acknowledged_at=? WHERE id=?",
+                                (now, notification_id))
+                self._emit_ack([notification_id])
+                return 1
         for n in targets:
             n.state = "acknowledged"
             n.acknowledged_at = now
             self._queue.pop(n.id, None)
             self._persist(n)
-        return len(targets)
+        if notification_id is None:
+            # "acknowledge everything" also covers records from earlier runs
+            rows = self.db.query("SELECT id FROM notifications WHERE state IN ('delivered','queued')")
+            extra = [r["id"] for r in rows if r["id"] not in {n.id for n in targets}]
+            if extra:
+                self.db.execute("UPDATE notifications SET state='acknowledged', acknowledged_at=? "
+                                "WHERE state IN ('delivered','queued')", (now,))
+            ids = [n.id for n in targets] + extra
+        else:
+            ids = [n.id for n in targets]
+        self._emit_ack(ids)
+        return len(ids)
+
+    def _emit_ack(self, ids: list[str]) -> None:
+        if ids and self.bus is not None:
+            self.bus.emit(Event(EventType.NOTIFICATION_ACKNOWLEDGED, "notifications",
+                                {"ids": ids[:50], "count": len(ids)}))
+
+    def list(self, *, states: list[str] | None = None, limit: int = 50,
+             since: float | None = None) -> list[dict[str, Any]]:
+        """Stored notifications, newest first (the API's view; includes earlier runs)."""
+        clauses, params = [], []
+        if states:
+            clauses.append(f"state IN ({','.join('?' * len(states))})")
+            params += states
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(since)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.db.query(f"SELECT * FROM notifications {where} ORDER BY ts DESC, rowid DESC LIMIT ?",
+                             (*params, limit))
+        out = []
+        for r in rows:
+            item = dict(r)
+            item["priority"] = NotificationPriority(r["priority"]).name.lower()
+            item["text"] = Notification(r["id"], NotificationPriority(r["priority"]), r["title"], r["body"] or "").text()
+            out.append(item)
+        return out
 
     def acknowledge_task(self, task_id: str) -> int:
         """Mark queued notifications about a task as seen (e.g. its result was just reported inline)."""
@@ -209,6 +287,15 @@ class NotificationManager:
                 self._persist(n)
                 count += 1
         return count
+
+    def mark_delivered(self, items: list[Notification]) -> None:
+        """Queued items an interface has just shown the user (e.g. on their return)."""
+        now = self.clock.now()
+        for n in items:
+            n.state = "delivered"
+            n.delivered_at = now
+            self._queue.pop(n.id, None)
+            self._persist(n)
 
     def history(self, limit: int = 20, min_priority: NotificationPriority = NP.INFORMATIONAL) -> list[dict[str, Any]]:
         rows = self.db.query("SELECT * FROM notifications WHERE priority >= ? ORDER BY ts DESC, rowid DESC LIMIT ?",
@@ -261,6 +348,13 @@ class NotificationManager:
             return NP.IMPORTANT, p.get("message", "predicted problem"), "", f"predict:{p.get('metric')}"
         if t == EventType.TREND_DETECTED:
             return NP.INFORMATIONAL, p.get("message", "trend detected"), "", f"trend:{p.get('metric')}"
+        if t == EventType.SYSTEM_RECOVERED:
+            return NP.IMPORTANT, "JARVIS restarted after an unexpected stop", p.get("summary", ""), "system-recovered"
+        if t == EventType.SCHEDULE_MISSED:
+            return NP.IMPORTANT, f"Missed the scheduled run of {p.get('name')}", p.get("reason", ""), \
+                f"missed:{p.get('id')}"
+        if t == EventType.BRIEFING_READY:
+            return NP.IMPORTANT, "Your briefing is ready", p.get("headline", ""), f"briefing:{p.get('id')}"
         if t == EventType.SUBSYSTEM_DEGRADED:
             if str(p.get("component", "")).startswith("model:"):
                 return None     # MODEL_UNAVAILABLE reports model outages with better wording

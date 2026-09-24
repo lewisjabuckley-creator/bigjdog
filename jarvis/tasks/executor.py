@@ -66,7 +66,9 @@ class TaskExecutor:
             return self._handle_interrupt(task, controller)
 
     def _actor(self, task: Task) -> Actor:
-        return Actor("task", task.id, task.owner, interactive=bool(task.authority.get("interactive", False)))
+        delegated = task.created_by if task.created_by.startswith(("automation:", "agent:")) else None
+        return Actor("task", task.id, task.owner, interactive=bool(task.authority.get("interactive", False)),
+                     delegated_by=delegated)
 
     def _ctx(self, task: Task, controller: TaskController, step: Step | None = None) -> ToolContext:
         return ToolContext(actor=self._actor(task), task_id=task.id, cwd=task.cwd, dry_run=task.dry_run,
@@ -100,6 +102,10 @@ class TaskExecutor:
             step = task.current_step
             if step is None:
                 break
+            if controller.pause_after_step:
+                self.manager.checkpoint_task(task, "paused between steps")
+                self.manager.transition(task, TaskStatus.PAUSED, controller.pause_after_step)
+                return task
             if task.usage.get("steps", 0) >= int(task.budget.get("max_steps", 40)):
                 return self._finish(task, TaskStatus.FAILED, Outcome.PARTIAL,
                                     f"step budget of {task.budget.get('max_steps')} exhausted")
@@ -126,7 +132,8 @@ class TaskExecutor:
 
         reason = OperationalReason(f"it is step {task.plan.index(step) + 1} of '{task.title}'",
                                    f"objective: {task.objective}", f"ran {step.tool}")
-        execution = await self.registry.execute(step.tool, step.args, self._ctx(task, controller, step), reason=reason)
+        execution = await self.registry.execute(step.tool, self._resolve_refs(task, step.args),
+                                                self._ctx(task, controller, step), reason=reason)
         if execution.status == ExecStatus.CANCELLED or controller.cancel_event.is_set():
             step.status = StepStatus.PENDING
             step.interrupted = True
@@ -156,10 +163,17 @@ class TaskExecutor:
             self.manager.checkpoint_task(task, "awaiting approval")
             self.manager.transition(task, TaskStatus.WAITING, f"awaiting your approval to {execution.preview}")
             return "wait"
+        if not execution.ok and execution.result is not None and execution.result.error == "model_unavailable":
+            step.status = StepStatus.PENDING
+            step.attempts -= 1
+            task.usage["steps"] -= 1
+            self._wait_for_model(task, f"waiting for a language model for '{step.description}'")
+            return "wait"
         if execution.ok or (execution.status == ExecStatus.EXECUTED and step.allow_failure
                             and execution.verification is not None and execution.verification.passed is not False):
             step.status = StepStatus.DONE
             step.error = None if execution.ok else _error_text(execution)
+            self._collect(task, step, execution)
             self.manager.checkpoint_task(task, f"completed {step.description}")
             self._progress(task, step)
             return "next"
@@ -177,6 +191,7 @@ class TaskExecutor:
                           summary=decision.reason.sentence(), reason=decision.reason)
         if decision.action == RecoveryAction.RETRY:
             step.status = StepStatus.PENDING
+            task.retry_count += 1
             self.manager.checkpoint_task(task, f"retrying {step.description}")
             try:
                 await asyncio.wait_for(controller.cancel_event.wait(), timeout=decision.delay_s)
@@ -244,8 +259,57 @@ class TaskExecutor:
             return self._finish(task, TaskStatus.COMPLETED, Outcome.UNKNOWN, f"finished, but {report.summary}")
         return self._finish(task, TaskStatus.FAILED, report.outcome, report.summary)
 
+    def _wait_for_model(self, task: Task, reason: str) -> Task:
+        """No model is reachable: wait (resumed automatically when one comes back) instead of failing."""
+        self.manager.checkpoint_task(task, "waiting for a language model")
+        task.checkpoint["waiting_for"] = "model"        # (checkpoint_task rebuilds the checkpoint)
+        self.manager.transition(task, TaskStatus.WAITING, reason)
+        return task
+
+    @staticmethod
+    def _resolve_refs(task: Task, args: dict[str, Any]) -> dict[str, Any]:
+        """Steps may take an earlier step's output as an argument: ``{"$from_step": 0}`` (the step's index)."""
+        def resolve(value: Any) -> Any:
+            if isinstance(value, dict) and set(value) == {"$from_step"}:
+                index = int(value["$from_step"])
+                if 0 <= index < len(task.plan) and task.plan[index].result:
+                    result = task.plan[index].result or {}
+                    return result.get("data") if result.get("data") is not None else result.get("summary")
+                return None
+            return value
+        return {k: resolve(v) for k, v in args.items()}
+
+    def _collect(self, task: Task, step: Step, execution: Execution) -> None:
+        """Record what a completed step produced: files it wrote and reports it generated."""
+        data = execution.result.data if execution.result else None
+        if step.tool == "file_write" and execution.args.get("path"):
+            task.artifacts.append({"type": "file", "path": execution.args["path"], "step": step.description})
+        if isinstance(data, dict):
+            for artifact in data.get("artifacts") or []:
+                if isinstance(artifact, dict):
+                    task.artifacts.append({**artifact, "step": step.description})
+            if isinstance(data.get("report"), str) and data["report"].strip():
+                task.result = data["report"].strip()
+
+    @staticmethod
+    def _derive_result(task: Task) -> str:
+        """The final result in words when no step produced an explicit report: the last step's output."""
+        for step in reversed(task.plan):
+            if step.status != StepStatus.DONE or not step.result:
+                continue
+            data = step.result.get("data")
+            if isinstance(data, dict) and str(data.get("stdout") or "").strip():
+                lines = str(data["stdout"]).strip().splitlines()
+                tail = "\n".join(lines[-20:])
+                return tail if len(tail) <= 2000 else "…" + tail[-2000:]
+            if step.result.get("summary"):
+                return str(step.result["summary"])
+        return ""
+
     def _finish(self, task: Task, status: TaskStatus, outcome: Outcome, reason: str) -> Task:
         task.outputs.setdefault("summary", reason)
+        if status == TaskStatus.COMPLETED and not task.result and task.kind != TaskKind.MONITOR:
+            task.result = self._derive_result(task) or task.outputs.get("summary", "")
         self.manager.checkpoint_task(task, reason)
         self.manager.transition(task, status, reason, outcome=outcome)
         self.permissions.revoke_for(task_id=task.id)

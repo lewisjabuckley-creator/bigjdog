@@ -111,3 +111,33 @@ only relevant tools, drops arguments the tool doesn't declare, requests an adequ
 reasoning traces, keeps each history message bounded, and feeds honest tool failures back so the model can
 recover. The model is never given authority: every call still goes through the registry, permissions and
 verification.
+
+### D20. One runtime, many interfaces (Phase 2)
+**Why:** work must continue when a window closes, and two runtimes on one database would schedule the same queued
+task twice. The existing `Runtime` became the only owner of state, running as a background process with a local
+API; interfaces are clients. There is still one `Runtime` class, reused in-process by `--embedded` and the tests.
+An OS file lock (released by the OS if the process dies) enforces one runtime per data directory.
+
+### D21. The local API is loopback HTTP on the standard library
+**Why:** HTTP with JSON is easy to reach from any future interface (HUD, voice, scripts) and easy to debug, and
+the stdlib `asyncio` server avoids a web-framework dependency for about twenty endpoints. It binds to loopback
+only, authenticates with a per-start bearer token in a user-only file, and refuses browser requests (any
+`Origin` header). It confers no authority: tool calls still go through the registry and permission manager.
+
+### D22. Unknown is an outcome
+**Why:** after a crash, JARVIS cannot know whether the step that was running took effect. Repeating a
+non-idempotent step could apply it twice; marking it done or failed would be a guess. Such steps are marked
+`outcome_unknown` and the task waits for the user unless the step is safe to repeat (idempotent, or assessed as
+observation only). A crash of the executor is treated the same way.
+
+### D23. Idempotency keys instead of distributed transactions
+**Why:** "exactly once" for scheduled runs and conversation turns comes from keys, not from wrapping the action
+and its bookkeeping in one transaction (which would hold SQLite's lock across awaits). A schedule slot's key
+(`schedule:<id>:<slot>`) is unique in the tasks table, and a turn's request id is recorded before the turn runs,
+so a crash between doing and recording returns the original result on retry.
+
+### D24. Presence decides delivery; records decide the "away" answer
+**Why:** a notification shown to nobody has not been delivered. The runtime tracks attached interfaces (an open
+stream is presence) and queues news while nobody is there, persisting the queue across restarts. "What happened
+while I was away?" is assembled from tasks, events, notifications and run records (including gaps when JARVIS
+itself was not running), never from the model's recollection, so it cannot invent a result.
