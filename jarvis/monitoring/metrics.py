@@ -14,6 +14,8 @@ from typing import Any, Protocol
 
 import psutil
 
+from jarvis.platforms import hidden_window_kwargs
+
 
 class MetricsSource(Protocol):
     def sample(self) -> dict[str, Any]: ...
@@ -86,7 +88,8 @@ class PsutilMetrics:
         try:
             out = subprocess.run(
                 [self._nvidia_smi, "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
-                 "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=3, check=True).stdout
+                 "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=3, check=True,
+                **hidden_window_kwargs()).stdout
             for line in out.strip().splitlines():
                 name, util, used, total, temp = [x.strip() for x in line.split(",")]
                 gpus.append({"name": name, "utilization": float(util), "memory_used_mb": float(used),

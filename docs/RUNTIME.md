@@ -184,7 +184,7 @@ Events are operational: what happened, to what, why. They never contain the mode
 |---|---|
 | Linux | Tested: background start (new session), `flock` lock, SIGTERM clean stop, `kill -9` recovery. The systemd user unit from `install-service` is generated but has not been exercised under systemd. |
 | macOS | Not tested. Same process model as Linux; `install-service` writes a launchd agent. |
-| Windows | Not tested on Windows. Written against the documented Win32 behaviour: a detached process with `pythonw.exe`, an `msvcrt` byte-range lock, and a Startup-folder launcher from `install-service`. Clean stop goes through the API; the fallback is a hard stop, after which restart recovery treats in-flight steps as unknown. `api.token` relies on your user profile's permissions (no `chmod`). |
+| Windows | Not fully tested on Windows. Written against the documented Win32 behaviour. The runtime runs under `python.exe` with a hidden console of its own (`CREATE_NO_WINDOW`), and every child process JARVIS starts (nvidia-smi, shell commands) is also started without a window, so no console windows flash up. It uses an `msvcrt` byte-range lock, and `install-service` writes a Startup-folder launcher. Clean stop goes through the API; the fallback is a hard stop, after which restart recovery treats in-flight steps as unknown. `api.token` relies on your user profile's permissions (no `chmod`). |
 
 Adapters: `jarvis/platforms/linux.py`, `macos.py` and `windows.py`. The package is named `platforms` because a
 package called `platform` would shadow Python's own `platform` module whenever the working directory is inside
@@ -225,4 +225,5 @@ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 | "another JARVIS runtime is already running" | One is running for this data directory, maybe an `--embedded` session. `jarvis runtime status`. |
 | The interface says it lost contact | The runtime stopped or restarted. Send a message: the CLI reconnects, starting the runtime if needed, and resends the same request id, so nothing is done twice. |
 | `jarvis runtime start` says it exited during startup | The message includes the end of `logs/runtime.out`; the full log is there. |
+| Windows: a console window flashes up every few seconds | Fixed after 0.2.0: an older runtime ran without any console, so each GPU check (`nvidia-smi`) opened a window. Update, then run `py -m jarvis runtime restart` so the old runtime is replaced. |
 | A task says "outcome unknown" | JARVIS was stopped while that step ran. Check whether its effect happened, then `continue` (run it again) or cancel the task. |

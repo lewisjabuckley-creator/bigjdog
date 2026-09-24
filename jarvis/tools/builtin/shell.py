@@ -24,6 +24,7 @@ from typing import Any
 
 from jarvis.core.types import Provenance, ProvenanceKind, RiskLevel
 from jarvis.permissions.model import PermissionLevel
+from jarvis.platforms import hidden_window_kwargs
 from jarvis.security.redaction import scrubbed_environment
 from jarvis.tools.base import Assessment, Tool, ToolContext, ToolResult, ToolSpec, Verification
 
@@ -190,7 +191,7 @@ class ShellTool(Tool):
         if not os.path.isdir(cwd):
             return ToolResult(False, f"working directory {cwd} does not exist", error="bad_cwd")
         started = time.monotonic()
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, Any] = hidden_window_kwargs()   # Windows: no console window flashing up
         if sys.platform != "win32":
             kwargs["start_new_session"] = True  # own process group so timeouts kill children too
         proc = await asyncio.create_subprocess_shell(
