@@ -751,8 +751,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 action = {"type": "briefing"} if args.briefing else \
                     {"type": "notify", "title": args.notify} if args.notify else \
                     {"type": "task", "objective": args.task,
-                     "steps": [{"tool": "shell_execute", "args": {"command": args.command},
-                                "description": args.command}] if args.command else [],
+                     "steps": [{"tool": "shell_execute", "args": {"command": args.shell_command},
+                                "description": args.shell_command}] if args.shell_command else [],
                      "priority": "P3"}
                 if action["type"] == "task" and not args.task:
                     print("say what to do: --task \"objective\" [--command \"...\"], --notify \"text\" or --briefing")
@@ -1084,7 +1084,9 @@ def main(argv: list[str] | None = None) -> int:
     sched.add_argument("--every", metavar="DURATION", help="e.g. 30m, 2h, 1d")
     sched.add_argument("--at", dest="at_time", metavar="ISO-TIME", help="once, e.g. 2026-10-01T09:00")
     sched.add_argument("--task", metavar="OBJECTIVE")
-    sched.add_argument("--command", help="shell command for the task (runs with automation authority)")
+    # dest must not be "command": that is the subcommand's own dest, and a clash silently opened a chat instead
+    sched.add_argument("--command", dest="shell_command",
+                       help="shell command for the task (runs with automation authority)")
     sched.add_argument("--notify", metavar="TEXT")
     sched.add_argument("--briefing", action="store_true", help="prepare the morning briefing")
     doctor = sub.add_parser("doctor", help="self-diagnostics")

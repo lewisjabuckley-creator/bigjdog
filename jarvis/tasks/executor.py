@@ -290,6 +290,7 @@ class TaskExecutor:
                     task.artifacts.append({**artifact, "step": step.description})
             if isinstance(data.get("report"), str) and data["report"].strip():
                 task.result = data["report"].strip()
+                task.outputs["result_preview"] = _preview(task.result)
 
     @staticmethod
     def _derive_result(task: Task) -> str:
@@ -299,8 +300,11 @@ class TaskExecutor:
                 continue
             data = step.result.get("data")
             if isinstance(data, dict) and str(data.get("stdout") or "").strip():
-                lines = str(data["stdout"]).strip().splitlines()
+                lines = [ln for ln in str(data["stdout"]).strip().splitlines()]
                 tail = "\n".join(lines[-20:])
+                # a command's summary is usually its last line (ping statistics, "5 passed", "Done")
+                last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+                task.outputs["result_preview"] = _preview(last)
                 return tail if len(tail) <= 2000 else "…" + tail[-2000:]
             if step.result.get("summary"):
                 return str(step.result["summary"])
@@ -396,6 +400,11 @@ class TaskExecutor:
             self.manager.checkpoint_task(fresh, "interrupted by shutdown")
             self.manager.mark_interrupted(fresh)
         return fresh
+
+
+def _preview(text: str, limit: int = 200) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[:limit - 1].rstrip() + "…"
 
 
 def _error_text(execution: Execution) -> str:

@@ -266,7 +266,7 @@ class TaskManager:
             payload = {"title": task.title, "from": old.value, "to": status.value, "reason": reason,
                        "outcome": task.outcome.value if task.outcome else None, "by": by}
             if status == TaskStatus.COMPLETED and task.result:
-                preview = " ".join(task.result.split())
+                preview = task.outputs.get("result_preview") or " ".join(task.result.split())
                 payload["result"] = preview if len(preview) <= 200 else preview[:199].rstrip() + "…"
             self._emit(etype, task, payload, _SEVERITY.get(status, Severity.INFO))
         if status in (TaskStatus.QUEUED,):

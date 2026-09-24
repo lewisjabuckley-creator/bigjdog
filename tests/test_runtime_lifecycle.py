@@ -678,3 +678,33 @@ async def test_queued_news_reaches_an_open_window_once_the_user_is_idle(tmp_path
         assert n.state == "delivered"
     finally:
         await rt.stop()
+
+
+async def test_jarvis_never_kills_its_own_process(tmp_path):
+    from jarvis.permissions.model import Actor
+    from jarvis.tools.base import ToolContext
+    from jarvis.tools.builtin.shell import ShellTool
+    tool = ShellTool()
+    ctx = ToolContext(actor=Actor.user(), cwd=str(tmp_path))
+    for command in (f"taskkill /F /PID {os.getpid()}", f"kill -9 {os.getpid()}", "taskkill /IM python.exe /F"):
+        result = await tool.run({"command": command}, ctx)
+        assert not result.ok and result.error == "self_command" and "stop JARVIS itself" in result.summary
+    assert tool.assess({"command": "taskkill /F /PID 120"}).level == PermissionLevel.EXECUTE_CONSEQUENTIAL
+
+
+async def test_a_command_notification_shows_its_last_line(tmp_path):
+    rt, _ = make_runtime(str(tmp_path), mode="daemon")
+    await rt.start()
+    try:
+        rt.svc.permissions.grant("*", PermissionLevel.EXECUTE_CONSEQUENTIAL, tools=["shell_execute"])
+        command = f'"{sys.executable}" -c "print(\'Reply 1\'); print(\'Reply 2\'); print(\'Packets: Sent = 2, Lost = 0\')"'
+        task = rt.svc.tasks.create_task("$ ping", created_by="user:owner", cwd=str(tmp_path),
+                                        steps=[Step("ping", "shell_execute", {"command": command})])
+        done = await rt.svc.pool.wait_for(task.id)
+        await rt.svc.bus.drain()
+        assert done.status == S.COMPLETED, done.status_reason
+        note = next(n for n in rt.svc.notifications.pending() if n.task_id == task.id)
+        assert note.text() == "$ ping finished. Packets: Sent = 2, Lost = 0"
+        assert "Reply 1" in done.result          # the full output is still the result
+    finally:
+        await rt.stop()

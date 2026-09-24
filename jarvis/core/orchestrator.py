@@ -1373,7 +1373,8 @@ class Orchestrator:
         long_running = bool(tool and tool.spec.long_running)
         if long_running and not ctx.dry_run:
             # durable + interruptible: run it as a task and wait briefly
-            task = self._user_task(f"{call.name} for: {user_text[:80]}", title=f"{call.name}: {user_text[:50]}",
+            what = (tool.preview(call.arguments) if tool else call.name).split(" (in ")[0]
+            task = self._user_task(f"{call.name} for: {user_text[:80]}", title=what[:60],
                                    steps=[Step(tool.preview(call.arguments) if tool else call.name, call.name,
                                                call.arguments)], policy=TaskPolicy(on_step_failure="fail"),
                                    cwd=ctx.cwd)

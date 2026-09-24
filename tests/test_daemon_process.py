@@ -194,3 +194,16 @@ def test_install_service_prints_a_definition(runtime_dirs):
     assert out.returncode == 0 and "runtime run" in out.stdout
     if sys.platform.startswith("linux"):
         assert "[Service]" in out.stdout and "KillSignal=SIGTERM" in out.stdout
+
+
+def test_schedule_commands_work_from_the_command_line(runtime_dirs):
+    data, config = runtime_dirs
+    added = jarvis(config, "schedule", "add", "hello", "--every", "1m", "--notify", "Hello from JARVIS")
+    assert added.returncode == 0 and "scheduled hello (every minute)" in added.stdout, added.stdout + added.stderr
+    listed = jarvis(config, "schedule", "list")
+    assert "hello — every minute" in listed.stdout
+    schedule_id = listed.stdout.split()[0]
+    assert "removed" in jarvis(config, "schedule", "remove", schedule_id).stdout
+    assert "No schedules" in jarvis(config, "schedule", "list").stdout
+    assert jarvis(config, "runtime", "stop").returncode == 0
+

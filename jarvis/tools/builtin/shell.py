@@ -62,6 +62,9 @@ _CONSEQUENTIAL = {
     "iptables", "ufw", "firewall-cmd", "crontab", "useradd", "userdel", "passwd", "docker", "podman",
     "kubectl", "helm", "terraform", "ansible", "psql", "mysql", "mongo", "redis-cli", "sqlite3", "apt",
     "apt-get", "yum", "dnf", "brew", "pacman", "snap", "ssh", "scp", "rsync", "truncate", "ln",
+    # Windows
+    "taskkill", "tskill", "del", "erase", "rd", "format", "diskpart", "reg", "sc", "bcdedit", "cipher", "icacls",
+    "takeown", "robocopy",
 }
 _NETWORK = {"curl", "wget", "ssh", "scp", "rsync", "ping", "nc", "telnet", "ftp", "sftp", "dig", "nslookup",
             "traceroute", "http", "aria2c"}
@@ -101,9 +104,20 @@ def _words(segment: str) -> list[str]:
     return words
 
 
+_KILL = re.compile(r"\b(taskkill|tskill|kill|pkill|killall|stop-process|spps)\b", re.IGNORECASE)
+_INTERPRETER = re.compile(r"(?<![\w.-])(python[w0-9.]*|py)(\.exe)?\b|runtime\.pid", re.IGNORECASE)
+
+
+def targets_jarvis_process(command: str) -> bool:
+    """A kill command that would take down JARVIS itself: its own pid, or every Python process."""
+    if not _KILL.search(command):
+        return False
+    return str(os.getpid()) in re.findall(r"\b\d+\b", command) or bool(_INTERPRETER.search(command))
+
+
 def classify_command(command: str) -> Assessment:
     text = command.strip()
-    if is_self_command(text):
+    if is_self_command(text) or targets_jarvis_process(text):
         # never executed (see ShellTool.run), so asking for approval would only be noise
         return Assessment(PermissionLevel.OBSERVE, RiskLevel.NONE, "controls JARVIS itself (refused)")
     for pattern in _CATASTROPHIC:
@@ -191,6 +205,10 @@ class ShellTool(Tool):
         if is_self_command(args["command"]):
             return ToolResult(False, f"`{_short(args['command'])}` controls JARVIS itself, so it isn't run from inside "
                                      "JARVIS (it could stop JARVIS in the middle of running it). Run it in a terminal.",
+                              error="self_command")
+        if targets_jarvis_process(args["command"]):
+            return ToolResult(False, f"`{_short(args['command'])}` would stop JARVIS itself, so it isn't run from inside "
+                                     "JARVIS. To stop JARVIS, run `py -m jarvis runtime stop` in a terminal.",
                               error="self_command")
         base = ctx.cwd or os.getcwd()
         cwd = os.path.expanduser(args.get("cwd") or base)
