@@ -82,7 +82,7 @@ def test_a_v1_database_is_migrated_in_place(tmp_path):
     conn.commit()
     conn.close()
     db = Database(path)
-    assert db.schema_version() == 2
+    assert db.schema_version() == MIGRATIONS[-1][0]          # migrated to the current schema
     task = TaskManager(db).get_task("task-old")
     assert task.title == "old" and task.idempotency_key is None and task.request == "" and task.artifacts == []
     db.close()

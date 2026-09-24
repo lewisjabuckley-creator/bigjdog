@@ -242,12 +242,31 @@ notifications ("Deployment failed. health check returned 503").
   stop, close resources, release the lock). A *passive* start (read-only CLI commands while no runtime is
   running) skips workers, scheduler, recovery and the run record.
 
+### Intelligence (`intelligence/`, Phase 3)
+Complex requests become goals and plans on top of the task system; see [PHASE3.md](PHASE3.md) for the full
+design. `GoalParser` turns a request into a structured `Goal` (constraints, deadline, priority, mode,
+complexity, ambiguity, sub-goals). `PlanBuilder` builds a DAG of nodes from a deterministic playbook, a compound
+request mapped onto the intent grammar, or a validated model proposal, and inserts approval gates. `PlanEngine`
+runs ready nodes as ordinary tasks (so every step goes through the same registry, permissions, checkpoints and
+recovery), follows them through task events, decides from evidence, grants approved actions single-use,
+fingerprint-bound authority, verifies through a separate identity, classifies failures and replans within the
+`LoopGuard` limits, and completes with a quality state. `AgentCoordinator`, `RoutingPolicy` (with the router's
+`InferenceScheduler`), `PlanMemory`, `Autonomy`, `Simulator` and `ReactionEngine` supply agents, model choice,
+memory, autonomy levels, estimates and event-driven behaviour. `core/plan_dialogue.py` is the conversation side.
+
+```text
+ request ─► GoalParser ─► Goal ─► PlanBuilder ─► Plan (DAG) ─► PlanEngine ─► tasks ─► ToolRegistry
+                 │ simple: direct paths          │ gates = approvals; verify = verifier identity
+                 └ ambiguous: one question       └ failures → strategies → Replanner (bounded) → report
+```
+
 ## Data (SQLite, `database/schema.py`)
 
 `events`, `state`, `entities`, `relations`, `tasks`, `approvals`, `grants`, `audit`, `memories` (+ `memories_fts`,
 `embeddings`), `decisions` (+ `decisions_fts`), `projects`, `notifications`, `automations`, `conversation`,
 `users`; since schema v2 also `runtime_runs`, `requests` (conversation turn idempotency), `briefings`, a unique
-`tasks.idempotency_key` and schedule state columns on `automations`. WAL mode, one connection guarded by a
+`tasks.idempotency_key` and schedule state columns on `automations`; since schema v3 `goals`, `plans` and
+`plan_revisions`. WAL mode, one connection guarded by a
 re-entrant lock, versioned migrations (an existing v1 database is upgraded in place).
 
 ## Extending JARVIS
@@ -275,7 +294,9 @@ audit.
 2. **Process-level tests** (`tests/test_daemon_process.py`, POSIX): the real background runtime through the CLI:
    start, status, single instance, clean stop, closing the interface mid-task, `kill -9` mid-step, SIGTERM.
 3. **Acceptance scenarios** (`tests/test_scenarios.py`): the full runtime with a simulated model, metrics and
-   network, exercising the twenty scenarios in spec §200.
+   network, exercising the twenty scenarios in spec §200. Phase 3 adds `test_intelligence_units.py`,
+   `test_planning.py` (the plan engine on a real runtime with real processes and files) and
+   `test_phase3_scenarios.py` (its ten definition-of-done scenarios through the conversation).
 4. **Live integration** (`tests/integration/`, opt-in with `JARVIS_OLLAMA_TESTS=1`): a real Ollama server.
    `test_live_runtime.py` covers the persistent runtime against it: health and model state, a task waiting
    through an Ollama outage, and the Phase 2 acceptance scenario through real processes.

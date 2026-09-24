@@ -13,7 +13,8 @@ covered by tests. "Partial" means the architecture and a working subset exist.
 | 6. Autonomy (planner, verification, recovery, agents, proactive notifications) | **Done (v1)** | Templates plus validated LLM planning, bounded replanning, supervised agents, interrupt policy, emergency mode. |
 | 7. Interface (dashboard, HUD, voice, visualisation, screen awareness) | **Partial** | CLI with status block, activity, events, debug view. No GUI, voice or screen awareness yet. |
 | 8. Advanced integration (communications, external APIs, smart devices, robotics, telemetry) | **Interfaces only** | Device contract with telemetry verification and a simulated device; call/message event types and notification rules. No real integrations. |
-| Repository Phase 2: persistent, always-on runtime | **Done (Linux-tested)** | Background runtime with a local authenticated API; the CLI is a client; work continues when the interface closes; restart recovery with validation and unknown outcomes; durable scheduler; presence-aware notifications; "what happened while I was away?"; briefing data; unified health; live state including JARVIS's own cost; resource policy; model waiting. macOS and Windows adapters are written but untested. See [RUNTIME.md](RUNTIME.md) and [PHASE2.md](PHASE2.md). |
+| Repository Phase 3: intelligence and autonomy | **Done (Linux-tested)** | Goals as structured data with ambiguity classes; plans as DAGs on the task system (parallel branches, conditions, bounded loops, approval gates, checkpoints); playbooks, compound requests and validated model-proposed plans; independent verification with quality states; failure categories, dynamic replanning and loop protection; assumptions; agent contracts, coordination and isolation; resource- and priority-aware model routing with an inference queue; memory-aware planning and decision memory; advice, dry runs, simulation and prediction; corrections in flight; autonomy levels; event-driven investigations and proactive suggestions. See [PHASE3.md](PHASE3.md). |
+| Repository Phase 2: persistent, always-on runtime | **Done (verified on Windows by the owner)** | Background runtime with a local authenticated API; the CLI is a client; work continues when the interface closes; restart recovery with validation and unknown outcomes; durable scheduler; presence-aware notifications; "what happened while I was away?"; briefing data; unified health; live state including JARVIS's own cost; resource policy; model waiting. macOS and Windows adapters are written but untested. See [RUNTIME.md](RUNTIME.md) and [PHASE2.md](PHASE2.md). |
 
 ## Next, in order
 
@@ -46,6 +47,10 @@ covered by tests. "Partial" means the architecture and a working subset exist.
     download); add type checking.
 
 ## Known limitations
+
+- Phase 3 research reads local files and memory only (no web search tool); performance fixes are limited to
+  stopping a process or unloading an idle model, always with approval; conflict detection between sources is a
+  heuristic that flags rather than decides.
 
 - Tasks execute only while the runtime process is running. It now runs in the background and survives closing
   the interface, but it does not start at login unless you install the service definition

@@ -286,4 +286,57 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX idx_conversation_session ON conversation(session_id, ts);
         """,
     ),
+    (
+        3,
+        """
+        CREATE TABLE goals (
+            id TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            complexity INTEGER NOT NULL,
+            session_id TEXT,
+            project_id TEXT,
+            data TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX idx_goals_created ON goals(created_at);
+
+        CREATE TABLE plans (
+            id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            status_reason TEXT,
+            priority TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            source TEXT,
+            created_by TEXT NOT NULL,
+            origin TEXT,
+            session_id TEXT,
+            project_id TEXT,
+            quality TEXT,
+            data TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 0,
+            revision INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            started_at REAL,
+            finished_at REAL
+        );
+        CREATE INDEX idx_plans_status ON plans(status, updated_at);
+        CREATE INDEX idx_plans_goal ON plans(goal_id);
+
+        CREATE TABLE plan_revisions (
+            plan_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            ts REAL NOT NULL,
+            trigger TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            nodes TEXT NOT NULL,
+            PRIMARY KEY (plan_id, version)
+        );
+        """,
+    ),
 ]

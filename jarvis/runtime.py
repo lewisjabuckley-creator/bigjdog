@@ -41,6 +41,7 @@ from jarvis.devices.registry import DeviceCommandTool, DeviceRegistry
 from jarvis.events.bus import EventBus
 from jarvis.events.store import EventStore
 from jarvis.events.types import Event, EventType
+from jarvis.intelligence.service import IntelligenceService
 from jarvis.log import configure_logging, get_logger
 from jarvis.memory.decisions import DecisionLog
 from jarvis.memory.store import MemoryStore
@@ -50,6 +51,7 @@ from jarvis.models.openai_compat import OpenAICompatibleProvider
 from jarvis.models.readiness import ModelReadiness
 from jarvis.models.readiness import assess as assess_models
 from jarvis.models.router import ModelRouter
+from jarvis.models.scheduler import InferenceScheduler
 from jarvis.monitoring.metrics import MetricsSource, PsutilMetrics
 from jarvis.monitoring.service import (ModelMonitor, MonitoringService, NetworkMonitor, NetworkProbe, SelfMonitor,
                                        SystemMonitor)
@@ -85,6 +87,7 @@ class StartupReport:
     duration_s: float = 0.0
     readiness: ModelReadiness | None = None
     unclean_previous_stop: bool = False
+    plans: list[dict[str, Any]] = field(default_factory=list)
 
     def greeting(self) -> str:
         parts = ["Ready."]
@@ -103,6 +106,9 @@ class StartupReport:
             parts.append(text if "'continue'" in text else text + " Say 'continue' to resume.")
         if resumed:
             parts.append(f"Resumed {len(resumed)} task{'s' if len(resumed) != 1 else ''} after the restart.")
+        held_plans = [p for p in self.plans if p["status"] in ("paused", "blocked")]
+        if held_plans:
+            parts.append(" ".join(p["summary"].rstrip(".") + "." for p in held_plans[:2]))
         parts += self.issues[:3]
         return " ".join(parts)
 
@@ -203,7 +209,8 @@ class Runtime:
         registry.register(ModelReportTool(router))
         planner = Planner(registry, router)
         agents = AgentRegistry()
-        registry.register(DelegateToAgentTool(agents, AgentRunner(registry, router)))
+        agent_runner = AgentRunner(registry, router, max_concurrent=cfg.intelligence.agents_max_concurrent)
+        registry.register(DelegateToAgentTool(agents, agent_runner))
 
         async def verify_command(command: str, cwd: str | None) -> tuple[int | None, str]:
             ctx = ToolContext(actor=Actor("system", "verifier"), cwd=cwd, clock=clock, data_dir=str(data))
@@ -217,6 +224,8 @@ class Runtime:
                                     memory_critical=cfg.resources.memory_critical,
                                     cpu_critical=cfg.resources.cpu_critical, vram_critical=cfg.resources.vram_critical,
                                     low_priority_policy=cfg.resources.low_priority_policy)
+        # model requests queue by priority (the user first); under pressure one at a time
+        router.scheduler = InferenceScheduler(cfg.intelligence.max_concurrent_inference, pressure=resources.pressure)
         executor = TaskExecutor(tasks, registry, approvals, permissions, audit, planner=planner,
                                 verifier=Verifier(verify_command),
                                 monitor_checker=MonitorChecker(tasks, registry, state, bus), bus=bus, clock=clock,
@@ -239,10 +248,12 @@ class Runtime:
         automations.attach()
         bus.subscribe(str(EventType.MODEL_RECOVERED), lambda e: self._resume_model_waiters(), name="model-waiters")
         tasks.on_cancel.append(lambda t: approvals.cancel_for_task(t.id))
-        return Services(cfg, clock, db, bus, events, state, world, health, permissions, approvals, audit, registry,
-                        router, tasks, resources, pool, memory, decisions, projects, modes, notifications, emergency,
-                        automations, devices, metrics, presence=presence, user=cfg.general.user,
-                        simulated=self.simulated, extra={"agents": agents})
+        svc = Services(cfg, clock, db, bus, events, state, world, health, permissions, approvals, audit, registry,
+                       router, tasks, resources, pool, memory, decisions, projects, modes, notifications, emergency,
+                       automations, devices, metrics, presence=presence, user=cfg.general.user,
+                       simulated=self.simulated, extra={"agents": agents, "agent_runner": agent_runner})
+        svc.intelligence = IntelligenceService(svc, agents=agents, runner=agent_runner)
+        return svc
 
     def _default_providers(self) -> list[ModelProvider]:
         cfg = self.config.models
@@ -304,6 +315,10 @@ class Runtime:
         svc.health.report("runtime", HealthStatus.HEALTHY, "starting")
         report.recovered = self._recover(svc)
         svc.extra["recovery_reports"] = report.recovered
+        if svc.intelligence is not None:
+            # plans follow their tasks: after task recovery, bring every open plan up to date
+            svc.intelligence.attach()
+            report.plans = await svc.intelligence.recover()
         if report.unclean_previous_stop and previous is not None:
             self._report_unclean_stop(svc, previous, report.recovered)
         try:
@@ -329,6 +344,8 @@ class Runtime:
         self._periodic("scheduler", self.config.scheduler.tick_s, self._schedule_tick)
         self._periodic("runtime", self.config.runtime.heartbeat_s, self._heartbeat)
         self._periodic("maintenance", 6 * 3600.0, self._maintenance)
+        if svc.intelligence is not None:
+            self._periodic("planner", max(0.05, self.config.scheduler.tick_s), svc.intelligence.tick)
         if use_monitoring:
             svc.monitoring = MonitoringService(
                 self.config.monitoring, system=system,
@@ -577,6 +594,9 @@ class Runtime:
         self._loops.clear()
         if svc.monitoring:
             await svc.monitoring.stop()
+        if svc.intelligence is not None:
+            svc.intelligence.engine.enabled = False
+            await svc.intelligence.engine.settle(2.0)
         await svc.pool.stop()
         now = self.clock.now()
         svc.bus.emit(Event(EventType.SYSTEM_STOPPED, "runtime",

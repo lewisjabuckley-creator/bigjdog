@@ -568,6 +568,9 @@ class TaskManager:
         if self.bus is not None:
             payload = {**payload, "task_kind": task.kind.value, "priority": task.priority.name,
                        "created_by": task.created_by}
+            if task.outputs.get("plan_id"):
+                payload["plan_id"] = task.outputs["plan_id"]
+                payload["plan_node"] = task.outputs.get("plan_node")
             self.bus.emit(Event(etype, "tasks", payload, severity=severity, task_id=task.id,
                                 entity_id=f"task:{task.id}"))
 

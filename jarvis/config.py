@@ -215,6 +215,30 @@ class BriefingConfig:
 
 
 @dataclass
+class IntelligenceConfig:
+    """Planning, agents and autonomy (Phase 3). Limits exist so no plan can loop or run away."""
+    enabled: bool = True
+    autonomy: str = "normal"            # low | normal | high (emergency follows emergency mode)
+    preview: str = "consequential"      # always | consequential | never: show a plan and wait for "go" first
+    max_parallel_nodes: int = 3         # nodes of one plan running at the same time
+    max_nodes: int = 40                 # nodes in one plan, including ones added by replanning
+    max_node_attempts: int = 3          # times one node may be started (retries and alternatives)
+    max_replans: int = 3                # revisions of one plan
+    max_identical_failures: int = 2     # the same failure again stops retrying
+    retry_backoff_s: float = 2.0
+    max_model_calls: int = 30           # per plan
+    max_plan_hours: float = 12.0        # a plan still open after this long waits for the user
+    resource_wait_max_s: float = 1800.0 # how long work waits for resources before asking
+    max_concurrent_inference: int = 2   # model requests at once; the rest queue by priority
+    agents_max_concurrent: int = 2
+    reactions: bool = True              # investigate some events by itself (observe-only)
+    proactive: bool = True              # offer suggestions when they are relevant
+    reaction_cooldown_s: float = 1800.0
+    max_reactions_per_hour: int = 4
+    process_sample_s: float = 1.5       # how long per-process CPU use is measured for
+
+
+@dataclass
 class JarvisConfig:
     general: GeneralConfig = field(default_factory=GeneralConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
@@ -230,6 +254,7 @@ class JarvisConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     resources: ResourcesConfig = field(default_factory=ResourcesConfig)
     briefing: BriefingConfig = field(default_factory=BriefingConfig)
+    intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
     source: str = "defaults"
 
     @property
@@ -376,6 +401,12 @@ def validate(cfg: JarvisConfig) -> None:
         raise ConfigError("resources.low_priority_policy must be pause, slow, wait or continue")
     if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", cfg.briefing.time):
         raise ConfigError("briefing.time must be HH:MM")
+    if cfg.intelligence.autonomy not in ("low", "normal", "high"):
+        raise ConfigError("intelligence.autonomy must be low, normal or high")
+    if cfg.intelligence.preview not in ("always", "consequential", "never"):
+        raise ConfigError("intelligence.preview must be always, consequential or never")
+    if cfg.intelligence.max_parallel_nodes < 1 or cfg.intelligence.max_concurrent_inference < 1:
+        raise ConfigError("intelligence.max_parallel_nodes and max_concurrent_inference must be >= 1")
     bad_days = [d for d in cfg.briefing.days if d.lower()[:3] not in WEEKDAYS]
     if bad_days:
         raise ConfigError(f"briefing.days: unknown day(s) {', '.join(bad_days)}")

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from jarvis.devices.registry import DeviceRegistry
     from jarvis.events.bus import EventBus
     from jarvis.events.store import EventStore
+    from jarvis.intelligence.service import IntelligenceService
     from jarvis.memory.decisions import DecisionLog
     from jarvis.memory.store import MemoryStore
     from jarvis.models.router import ModelRouter
@@ -63,6 +64,7 @@ class Services:
     metrics: "MetricsSource"
     monitoring: "MonitoringService | None" = None
     presence: "Presence | None" = None
+    intelligence: "IntelligenceService | None" = None
     user: str = "owner"
     simulated: bool = False
     extra: dict[str, Any] = field(default_factory=dict)

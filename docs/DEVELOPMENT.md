@@ -31,10 +31,12 @@ Each data directory has its own runtime, so a simulated runtime never touches yo
 
 | Layer | Command | Needs | Time |
 |---|---|---|---|
-| Everything offline | `python -m pytest` | nothing (no network, model or GPU) | ~30 s |
+| Everything offline | `python -m pytest` | nothing (no network, model or GPU) | ~100 s |
 | Unit and subsystem | `python -m pytest tests --ignore=tests/test_daemon_process.py --ignore=tests/test_scenarios.py` | nothing | ~10 s |
 | Acceptance scenarios (spec §200) | `python -m pytest tests/test_scenarios.py` | nothing | ~5 s |
 | Persistent runtime (in-process) | `python -m pytest tests/test_runtime_lifecycle.py tests/test_scheduler.py tests/test_api.py` | nothing | ~10 s |
+| Planning and autonomy (Phase 3) | `python -m pytest tests/test_intelligence_units.py tests/test_planning.py tests/test_phase3_scenarios.py` | nothing (starts short-lived busy processes) | ~70 s |
+| Live planning (Phase 3) | `JARVIS_OLLAMA_TESTS=1 python -m pytest tests/integration/test_live_planning.py` | a running Ollama, `gguf` and `numpy` | ~5 s |
 | Background runtime processes | `python -m pytest tests/test_daemon_process.py` | POSIX (skipped on Windows) | ~12 s |
 | Live Ollama plumbing | `JARVIS_OLLAMA_TESTS=1 python -m pytest tests/integration` | a running Ollama, `gguf` and `numpy` | ~25 s |
 | Ollama smoke tests for the runtime | `JARVIS_OLLAMA_TESTS=1 python -m pytest tests/integration/test_live_runtime.py` | same | ~6 s |
@@ -55,7 +57,9 @@ outage, made by a TCP relay the test takes down and brings back.
 - Async test functions run on a fresh event loop (`tests/conftest.py`, no plugin): 30 s timeout, 900 s for tests
   marked `ollama`.
 - `tests/helpers.py`: `build_engine()` (task engine on an in-memory database), `make_runtime()` (a full `Runtime`
-  with simulated model, metrics and network; `mode="daemon"` for presence-aware behaviour) and `wait_until()`.
+  with simulated model, metrics and network; `mode="daemon"` for presence-aware behaviour) and `wait_until()`;
+  for Phase 3, `spawn_cpu_hog()` (a busy process that is not a child of the test, since JARVIS protects its own
+  process tree), `kill_pid()` and `wait_plan()`.
 - Process-level tests start `python -m jarvis --config ... --data-dir ... --simulate runtime ...` with the
   repository on `PYTHONPATH`, and always kill any runtime they leave behind.
 - Prefer asserting on records (task fields, audit entries, events) over wording, except where the wording is the
@@ -64,5 +68,5 @@ outage, made by a TCP relay the test takes down and brings back.
 ## Where things live
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) (subsystems and the process model), [RUNTIME.md](RUNTIME.md) (operating the
-runtime, API, recovery, scheduler), [DECISIONS.md](DECISIONS.md) (why) and [PHASE2.md](PHASE2.md) (what Phase 2
-changed and why it was built that way).
+runtime, API, recovery, scheduler), [DECISIONS.md](DECISIONS.md) (why), [PHASE2.md](PHASE2.md) (what Phase 2
+changed and why it was built that way) and [PHASE3.md](PHASE3.md) (the planning and autonomy layer).

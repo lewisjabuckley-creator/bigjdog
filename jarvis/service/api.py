@@ -278,6 +278,16 @@ class ApiServer:
         r("GET", "/v1/approvals", self.approvals)
         r("GET", "/v1/grants", self.grants)
         r("GET", "/v1/models", self.models)
+        r("GET", "/v1/plans", self.list_plans)
+        r("GET", "/v1/plans/{id}", self.get_plan)
+        r("POST", "/v1/plans/{id}/pause", self.pause_plan)
+        r("POST", "/v1/plans/{id}/resume", self.resume_plan)
+        r("POST", "/v1/plans/{id}/cancel", self.cancel_plan)
+        r("POST", "/v1/plans/{id}/confirm", self.confirm_plan)
+        r("GET", "/v1/goals", self.list_goals)
+        r("POST", "/v1/goals", self.create_goal)
+        r("GET", "/v1/intelligence", self.intelligence)
+        r("POST", "/v1/intelligence/autonomy", self.set_autonomy)
         r("POST", "/v1/runtime/stop", self.stop_runtime)
         r("POST", "/v1/sim", self.simulate)
 
@@ -382,6 +392,84 @@ class ApiServer:
     async def cancel_task(self, req: Request) -> dict[str, Any]:
         result = self.svc.tasks.cancel_task(self._task(req.groups[0]).id, by=f"user:{self.svc.user}")
         return {"ok": result.ok, "message": result.message}
+
+    # -- goals and plans (Phase 3) ---------------------------------------------------------------------
+    def _intel(self) -> Any:
+        if self.svc.intelligence is None:
+            raise ApiError(409, "the planning layer is not available")
+        return self.svc.intelligence
+
+    def _plan(self, plan_id: str) -> Any:
+        plan = self._intel().get(plan_id)
+        if plan is None:
+            raise ApiError(404, f"no plan {plan_id}")
+        return plan
+
+    async def list_plans(self, req: Request) -> dict[str, Any]:
+        from jarvis.intelligence.plans import PLAN_OPEN, PlanStatus
+        which = req.query.get("status", "open")
+        statuses = None if which == "all" else PLAN_OPEN if which == "open" else \
+            [PlanStatus(s) for s in which.split(",")]
+        plans = self._intel().store.list(statuses, limit=req.int("limit", 50, 500))
+        return {"plans": [p.to_api() for p in plans]}
+
+    async def get_plan(self, req: Request) -> dict[str, Any]:
+        from jarvis.intelligence import explain
+        plan = self._plan(req.groups[0])
+        return {"plan": plan.to_api(), "preview": explain.preview(plan), "status_text": explain.status_line(plan),
+                "why": explain.why(plan), "revisions": self._intel().store.revisions(plan.id)}
+
+    async def pause_plan(self, req: Request) -> dict[str, Any]:
+        ok, message = await self._intel().engine.pause(self._plan(req.groups[0]).id, by=f"user:{self.svc.user}")
+        return {"ok": ok, "message": message}
+
+    async def resume_plan(self, req: Request) -> dict[str, Any]:
+        ok, message = await self._intel().engine.resume(self._plan(req.groups[0]).id, by=f"user:{self.svc.user}")
+        return {"ok": ok, "message": message}
+
+    async def cancel_plan(self, req: Request) -> dict[str, Any]:
+        ok, message = await self._intel().engine.cancel(self._plan(req.groups[0]).id, by=f"user:{self.svc.user}")
+        return {"ok": ok, "message": message}
+
+    async def confirm_plan(self, req: Request) -> dict[str, Any]:
+        plan = self._plan(req.groups[0])
+        if not plan.awaiting_confirmation:
+            raise ApiError(409, f"{plan.title} isn't waiting for confirmation")
+        started = await self._intel().confirm(plan.id)
+        return {"plan": (started or plan).to_api()}
+
+    async def list_goals(self, req: Request) -> dict[str, Any]:
+        return {"goals": [g.to_dict() for g in self._intel().store.recent_goals(req.int("limit", 20, 200))]}
+
+    async def create_goal(self, req: Request) -> tuple[int, dict[str, Any]]:
+        """Understand a request as a goal and, if it needs one, plan and start it with the user's authority."""
+        body = req.json()
+        text = str(body.get("text", "")).strip()
+        if not text:
+            raise ApiError(400, "text is required")
+        intel = self._intel()
+        goal = intel.understand(text, dry_run=bool(body.get("dry_run")))
+        if not intel.should_plan(goal) and not body.get("force"):
+            return 200, {"goal": goal.to_dict(), "plan": None,
+                         "note": f"a {goal.complexity.label} request: no plan needed; ask it in the conversation"}
+        if goal.ambiguity is not None and goal.ambiguity.must_ask:
+            return 200, {"goal": goal.to_dict(), "plan": None, "question": goal.ambiguity.question}
+        started = await intel.run(goal, cwd=str(body.get("cwd") or intel.home()), origin="api",
+                                  session_id=body.get("session"))
+        if started.plan is None:
+            raise ApiError(400, "; ".join(started.problems or ["could not plan that"]))
+        return 201, {"goal": goal.to_dict(), "plan": started.plan.to_api(), "preview": started.preview}
+
+    async def intelligence(self, req: Request) -> dict[str, Any]:
+        return self._intel().state()
+
+    async def set_autonomy(self, req: Request) -> dict[str, Any]:
+        level = str(req.json().get("level", ""))
+        try:
+            self._intel().autonomy.set(level, by=f"user:{self.svc.user}")
+        except ValueError as exc:
+            raise ApiError(400, str(exc))
+        return {"autonomy": self._intel().autonomy.describe()}
 
     # -- events and notifications ----------------------------------------------------------------------
     async def events(self, req: Request) -> dict[str, Any]:
@@ -490,9 +578,21 @@ class ApiServer:
                             "version": __version__},
                 "model": readiness.summary() if readiness is not None and readiness.can_converse else None,
                 "model_issues": list(readiness.issues[:2]) if readiness is not None else [],
-                "recovered": [{"id": r.task_id, "summary": r.summary} for r in recovered if not r.resumed
-                              and (t := svc.tasks.get_task(r.task_id)) is not None
-                              and t.status in (TaskStatus.PAUSED, TaskStatus.BLOCKED)][:3]}
+                "recovered": ([{"id": r.task_id, "summary": r.summary} for r in recovered if not r.resumed
+                               and (t := svc.tasks.get_task(r.task_id)) is not None and not t.outputs.get("plan_id")
+                               and t.status in (TaskStatus.PAUSED, TaskStatus.BLOCKED)] +
+                              [{"id": p["plan_id"], "summary": p["summary"]} for p in self._held_plans()])[:3]}
+
+    def _held_plans(self) -> list[dict[str, Any]]:
+        """Plans a restart left waiting for the user (e.g. a step whose outcome is unknown)."""
+        if self.svc.intelligence is None:
+            return []
+        out = []
+        for plan in self.svc.intelligence.open_plans():
+            if plan.status.value in ("paused", "blocked") and any(h.get("by") == "system:recovery"
+                                                                  for h in plan.history[-3:]):
+                out.append({"plan_id": plan.id, "summary": f"{plan.title}: {plan.status_reason}"})
+        return out
 
     async def detach(self, req: Request) -> dict[str, Any]:
         client = str(req.json().get("client_id", ""))

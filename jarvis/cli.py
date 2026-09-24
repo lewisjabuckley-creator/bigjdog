@@ -670,6 +670,79 @@ def cmd_task(args: argparse.Namespace) -> int:
     return _via_runtime_or_embedded(args, api, embedded)
 
 
+def _plan_line(p: dict[str, Any]) -> str:
+    done = sum(1 for n in p["nodes"] if n["status"] in ("done", "skipped", "failed", "cancelled"))
+    quality = f", {p['quality'].replace('_', ' ')}" if p.get("quality") else ""
+    return f"{p['id']}  {p['status']:<10} {done}/{len(p['nodes'])} steps{quality}  {p['title']}"
+
+
+def format_plan_detail(data: dict[str, Any]) -> str:
+    p = data["plan"]
+    lines = [f"{p['title']} ({p['id']})", f"status: {p['status']}" + (f" — {p['status_reason']}"
+                                                                      if p.get("status_reason") else ""),
+             f"goal: {p['goal']['text']}"]
+    if p["goal"]["constraints"]:
+        lines.append("constraints: " + "; ".join(p["goal"]["constraints"]))
+    lines.append("steps:")
+    marks = {"done": "✓", "failed": "✗", "skipped": "–", "cancelled": "–", "running": "▶", "waiting": "…",
+             "blocked": "!", "pending": " "}
+    for n in p["nodes"]:
+        detail = n.get("summary") or n.get("note") or ""
+        lines.append(f"  {marks.get(n['status'], ' ')} {n['title']}" + (f" — {detail[:120]}" if detail else ""))
+    if p.get("result"):
+        lines += ["result:", p["result"]]
+    if data.get("why"):
+        lines += ["why:", data["why"]]
+    return "\n".join(lines)
+
+
+def cmd_plans(args: argparse.Namespace) -> int:
+    def api(client: Any) -> int:
+        plans = client.get("/v1/plans", status="all" if args.all else "open")["plans"]
+        print("\n".join(_plan_line(p) for p in plans) or ("No plans." if args.all else "No open plans."))
+        return 0
+
+    async def embedded(a: argparse.Namespace) -> int:
+        async def run(runtime: Runtime, report: Any, sim: Any) -> int:
+            intel = runtime.svc.intelligence
+            plans = intel.recent(50) if a.all else intel.open_plans()
+            print("\n".join(_plan_line(p.to_api()) for p in plans) or ("No plans." if a.all else "No open plans."))
+            return 0
+        return await _with_runtime(a, run)
+    return _via_runtime_or_embedded(args, api, embedded)
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    def api(client: Any) -> int:
+        if args.action:
+            result = client.post(f"/v1/plans/{args.id}/{args.action}")
+            print(result.get("message") or result.get("plan", {}).get("status", "ok"))
+            return 0 if result.get("ok", True) else 1
+        print(format_plan_detail(client.get(f"/v1/plans/{args.id}")))
+        return 0
+
+    async def embedded(a: argparse.Namespace) -> int:
+        async def run(runtime: Runtime, report: Any, sim: Any) -> int:
+            from jarvis.intelligence import explain
+            intel = runtime.svc.intelligence
+            plan = intel.get(a.id)
+            if plan is None:
+                print(f"no plan {a.id}")
+                return 1
+            if a.action == "confirm":
+                await intel.confirm(plan.id)
+                print("started")
+                return 0
+            if a.action:
+                ok, message = await getattr(intel.engine, a.action)(plan.id, by=f"user:{runtime.svc.user}")
+                print(message)
+                return 0 if ok else 1
+            print(format_plan_detail({"plan": plan.to_api(), "why": explain.why(plan)}))
+            return 0
+        return await _with_runtime(a, run)
+    return _via_runtime_or_embedded(args, api, embedded)
+
+
 def cmd_away(args: argparse.Namespace) -> int:
     def api(client: Any) -> int:
         print(client.get("/v1/away")["text"])
@@ -1082,6 +1155,11 @@ def main(argv: list[str] | None = None) -> int:
     task = sub.add_parser("task", help="show one task (with its result), or pause/resume/cancel it")
     task.add_argument("id")
     task.add_argument("action", nargs="?", choices=["pause", "resume", "cancel"])
+    plans = sub.add_parser("plans", help="list plans (multi-step goals JARVIS is working on)")
+    plans.add_argument("--all", action="store_true")
+    plan = sub.add_parser("plan", help="show one plan (steps, result, why), or pause/resume/cancel/confirm it")
+    plan.add_argument("id")
+    plan.add_argument("action", nargs="?", choices=["pause", "resume", "cancel", "confirm"])
     sub.add_parser("away", help="what happened while you were away")
     notes = sub.add_parser("notifications", help="recent notifications")
     notes.add_argument("--ack", action="store_true", help="acknowledge all")
@@ -1127,6 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "ask":
             return asyncio.run(cmd_ask(args)) if args.embedded else client_ask(args)
         handlers = {"status": cmd_status_any, "tasks": cmd_tasks_any, "task": cmd_task, "away": cmd_away,
+                    "plans": cmd_plans, "plan": cmd_plan,
                     "notifications": cmd_notifications, "briefing": cmd_briefing, "schedule": cmd_schedule,
                     "doctor": cmd_doctor_any, "models": cmd_models_any, "events": cmd_events_any,
                     "approvals": cmd_approvals_any, "grants": cmd_grants_any, "runtime": cmd_runtime}

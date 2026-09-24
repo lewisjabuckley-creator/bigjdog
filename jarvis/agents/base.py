@@ -43,13 +43,27 @@ class AgentSpec:
     max_steps: int = 8
     max_model_calls: int = 10
     max_seconds: float = 300.0
+    # the contract (Phase 3): what it is for, what it needs, what it returns, how it fails
+    description: str = ""
+    inputs: tuple[str, ...] = ("objective",)
+    outputs: tuple[str, ...] = ("status", "summary", "findings")
+    on_failure: str = "fallback"         # fallback (the plan uses a deterministic alternative) | skip | fail
+    complexity: str = "medium"           # model preference: low | medium | high
+
+    def contract(self) -> dict[str, Any]:
+        return {"name": self.name, "purpose": self.description or self.role.split(".")[0], "tools": list(self.tools),
+                "permission_ceiling": self.max_level.label, "model": {"purpose": self.purpose.value,
+                                                                     "complexity": self.complexity},
+                "inputs": list(self.inputs), "outputs": list(self.outputs), "timeout_s": self.max_seconds,
+                "limits": {"steps": self.max_steps, "model_calls": self.max_model_calls},
+                "on_failure": self.on_failure}
 
 
 @dataclass
 class AgentResult:
     status: str                      # completed | failed | budget_exhausted | model_unavailable
     summary: str
-    findings: list[str] = field(default_factory=list)
+    findings: list[Any] = field(default_factory=list)      # text, or {"text", "quote", "source", "line"}
     artifacts: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     confidence: float = 0.0
@@ -68,11 +82,18 @@ _CONTRACT = """When you are finished, reply with JSON only:
 Only report what your tool results show. Do not invent results."""
 
 
+_RESEARCH_ROLE = (
+    "You are JARVIS's research agent. Investigate the question using local files and system information; "
+    "cross-check important claims. Report each finding as an object with the exact words from the source: "
+    '{"text": "what it means", "quote": "exact words copied from the file", "source": "file path", "line": n}. '
+    "A finding without an exact quote and its file will be discarded.")
+
 BUILTIN_AGENTS = [
-    AgentSpec("research", "You are JARVIS's research agent. Investigate the question using local files and "
-              "system information; cross-check important claims.",
+    AgentSpec("research", _RESEARCH_ROLE,
               ("file_list", "file_read", "file_search", "system_info", "search_memory"), PermissionLevel.OBSERVE,
-              Purpose.REASONING),
+              Purpose.REASONING, description="read sources and report findings with exact quotes",
+              inputs=("objective", "files"), outputs=("status", "summary", "findings[text, quote, source, line]"),
+              on_failure="fallback"),
     AgentSpec("testing", "You are JARVIS's testing agent. Run and analyse the project's tests; classify failures.",
               ("file_list", "file_read", "file_search", "shell_execute"), PermissionLevel.EXECUTE_REVERSIBLE,
               Purpose.CODING),
@@ -81,7 +102,11 @@ BUILTIN_AGENTS = [
               PermissionLevel.EXECUTE_REVERSIBLE, Purpose.SUMMARIZATION),
     AgentSpec("system", "You are JARVIS's system agent. Inspect processes and resources to explain system "
               "behaviour. You only observe.", ("system_info", "process_list", "process_inspect", "file_read"),
-              PermissionLevel.OBSERVE, Purpose.REASONING),
+              PermissionLevel.OBSERVE, Purpose.REASONING, description="explain system behaviour from measurements"),
+    AgentSpec("analyst", "You are JARVIS's analyst. You receive evidence already gathered by JARVIS and explain "
+              "what it shows. You have no tools: use only the evidence given, and say when it is insufficient.",
+              (), PermissionLevel.OBSERVE, Purpose.SUMMARIZATION, max_steps=0, max_model_calls=2, max_seconds=180,
+              description="interpret gathered evidence", inputs=("objective", "evidence"), on_failure="skip"),
 ]
 
 
@@ -108,10 +133,20 @@ class AgentRunner:
         self.registry = registry
         self.router = router
         self._slots = asyncio.Semaphore(max_concurrent)
+        self.max_concurrent = max_concurrent
+        self.active: dict[str, dict[str, Any]] = {}
+        # the planning layer adapts the model choice to resources and importance (see intelligence.routing)
+        self.profile_hook: Any = None
 
     async def run(self, spec: AgentSpec, objective: str, ctx: ToolContext, context: str = "") -> AgentResult:
         async with self._slots:
-            return await self._run(spec, objective, ctx, context)
+            key = f"{spec.name}:{ctx.task_id or id(ctx)}"
+            self.active[key] = {"agent": spec.name, "task_id": ctx.task_id, "objective": objective[:120],
+                                "started_at": time.time()}
+            try:
+                return await self._run(spec, objective, ctx, context)
+            finally:
+                self.active.pop(key, None)
 
     async def _run(self, spec: AgentSpec, objective: str, ctx: ToolContext, context: str) -> AgentResult:
         started = time.monotonic()
@@ -123,7 +158,10 @@ class AgentRunner:
         messages = [ChatMessage("system", f"{spec.role}\nUse only the tools provided.\n{_CONTRACT}"),
                     ChatMessage("user", f"Objective: {objective}\n{context}".strip())]
         result = AgentResult("failed", "")
-        profile = TaskProfile(purpose=spec.purpose, complexity="medium", needs_tools=bool(schemas), interactive=False)
+        profile = TaskProfile(purpose=spec.purpose, complexity=spec.complexity, needs_tools=bool(schemas),
+                              interactive=False)
+        if self.profile_hook is not None:
+            profile = self.profile_hook(spec, profile)
         while True:
             if ctx.cancel.is_set():
                 result.status, result.summary = "failed", "cancelled"
@@ -133,8 +171,14 @@ class AgentRunner:
                 result.status = "budget_exhausted"
                 result.summary = result.summary or "stopped: budget exhausted before a conclusion"
                 return result
+            remaining = spec.max_seconds - (time.monotonic() - started)
             try:
-                routed = await self.router.chat(profile, messages, tools=schemas or None)
+                routed = await asyncio.wait_for(self.router.chat(profile, messages, tools=schemas or None),
+                                                timeout=max(1.0, remaining))
+            except asyncio.TimeoutError:
+                result.status = "budget_exhausted"
+                result.summary = result.summary or f"stopped: no answer within {spec.max_seconds:g}s"
+                return result
             except ModelError as exc:
                 result.status, result.summary = "model_unavailable", f"no model available: {exc}"
                 return result
@@ -182,7 +226,7 @@ class AgentRunner:
             return result
         result.status = "completed" if data.get("status", "completed") == "completed" else "failed"
         result.summary = str(data.get("summary", ""))[:2000]
-        result.findings = [str(x) for x in data.get("findings", [])][:50]
+        result.findings = [x if isinstance(x, dict) else str(x) for x in data.get("findings", [])][:50]
         result.artifacts = [str(x) for x in data.get("artifacts", [])][:50]
         result.warnings = [str(x) for x in data.get("warnings", [])][:20]
         try:

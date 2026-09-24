@@ -8,18 +8,29 @@ as one component among many. You give it intent; it plans, executes through perm
 the result against reality, remembers what matters, keeps watching, and can always explain what it is doing
 and why.
 
-> **Status: v0.2, a persistent runtime.** The deterministic core, task engine, permission system, memory,
-> monitoring and conversational layer are implemented and tested. JARVIS talks through a real Ollama model, and
-> since Phase 2 it runs as a background runtime that interfaces connect to: closing the window doesn't stop
-> tasks, monitoring, schedules or notifications, and "What happened while I was away?" answers from the record.
-> The suite has 257 offline tests (including the twenty "final test" scenarios from the specification and
-> process-level tests of the background runtime) plus 21 opt-in live tests against a real Ollama server. The
-> runtime is tested on Linux; the macOS and Windows adapters are written but untested. Voice, vision, a
-> graphical HUD, communications and physical device integrations are **not implemented yet**; see
+> **Status: v0.3, intelligence and autonomy.** The deterministic core, task engine, permission system, memory,
+> monitoring and conversational layer are implemented and tested. JARVIS talks through a real Ollama model; since
+> Phase 2 it runs as a background runtime that interfaces connect to; and since Phase 3 it turns complex requests
+> into plans it carries out step by step — investigating, deciding, asking before changing anything, verifying
+> the result independently, adapting when something fails, and explaining why from the record. The suite has 373
+> offline tests (including the twenty "final test" scenarios from the specification, the ten Phase 3
+> scenarios and process-level tests of the background runtime) plus 24 opt-in live tests against a real Ollama
+> server. The runtime was verified on a Windows PC by its owner for Phase 2; Phase 3 is tested on Linux. Voice,
+> vision, a graphical HUD, communications and physical device integrations are **not implemented yet**; see
 > [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What it does today
 
+- **Carries out goals, not just commands.** "My computer is slow — find out why and fix it" becomes a plan: it
+  measures, works out the likely cause from the evidence, asks before changing anything ("I'd like to stop X
+  (PID n) — it can't be undone. Proceed?"), makes the change, has it checked independently, and tells you whether
+  it actually helped. If it didn't, it tries the next most likely fix instead of calling it done. Compound
+  requests ("run the tests, and if they pass build it, then tell me"), backups, disk cleanup and research over
+  your files work the same way; independent steps run in parallel. It remembers what didn't help last time,
+  recovers from broken tools by finding another way, adapts when you correct it mid-way ("leave Chrome alone"),
+  gives advice without acting ("what should I do about ...?"), simulates ("what would happen if I stopped
+  Chrome?"), and answers "why did you do that?" with the evidence, the approval and what verification found. See
+  [docs/PHASE3.md](docs/PHASE3.md).
 - **Keeps running when you close the window.** One background runtime per data directory owns all state and
   work; the CLI is a client of its local, token-authenticated API. Conversation turns, tasks, monitors, schedules
   and notifications carry on without an interface. When you come back, it tells you what finished and what needs
@@ -91,7 +102,8 @@ jarvis runtime install-service    # start at login (systemd / launchd / Windows 
 jarvis --embedded                 # run it inside this window instead (stops when you exit)
 ```
 
-Other commands: `jarvis ask "..."`, `jarvis status`, `jarvis tasks`, `jarvis task <id>`, `jarvis away`,
+Other commands: `jarvis ask "..."`, `jarvis status`, `jarvis tasks`, `jarvis task <id>`, `jarvis plans`,
+`jarvis plan <id>`, `jarvis away`,
 `jarvis notifications`, `jarvis briefing`, `jarvis schedule ...`, `jarvis doctor`. Details:
 [docs/RUNTIME.md](docs/RUNTIME.md).
 

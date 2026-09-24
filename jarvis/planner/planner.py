@@ -66,6 +66,9 @@ class Planner:
             if tool is None:
                 rejected.append(f"unknown tool {tool_name!r}")
                 continue
+            if tool.spec.category == "planning":
+                rejected.append(f"{tool_name} is internal to plans")
+                continue
             try:
                 args = validate_args(tool.spec.parameters, raw.get("args") or {})
             except SchemaError as exc:

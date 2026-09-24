@@ -58,6 +58,13 @@ class IntentKind(StrEnum):
     HELP = "help"
     SHORTER = "shorter"
     LONGER = "longer"
+    SYSTEM_QUERY = "system_query"        # one live number: CPU temperature, memory use...
+    ADVISE = "advise"                    # "what should I do?" — recommend, don't act
+    SIMULATE = "simulate"                # "what would happen if...?"
+    PREDICT = "predict"                  # "how long will the tests take?"
+    PLAN_SHOW = "plan_show"
+    PLAN_HISTORY = "plan_history"
+    AUTONOMY = "autonomy"
     CHAT = "chat"
 
 
@@ -207,6 +214,29 @@ rule(rf"(analy[sz]e|review|audit|assess) (the )?(?P<target>[\w.~/\\:-]+) {_CODEB
 rule(r"(open|switch to|load|work on) (the )?project (at |in )?(?P<target>.+)", IntentKind.OPEN_PROJECT, _t)
 rule(r"(open|switch to|load|work on) (the )?(?P<target>other one|.+?)( project)?", IntentKind.OPEN_PROJECT, _t)
 rule(r"do the same (thing )?for (the )?(?P<target>.+?)( project)?", IntentKind.REPEAT_FOR, _t)
+
+# -- planning and autonomy (Phase 3) ------------------------------------------------------------------------------
+rule(r"(check |what'?s |what is |how'?s |how hot is |show( me)? |tell me )?(my |the )?(cpu|processor|gpu|graphics card)"
+     r"('?s)? (temperature|temp|usage|load|utili[sz]ation)( right now| now)?|"
+     r"(how much )?(ram|memory) (am i using|is (used|free|in use|left))( right now)?|"
+     r"(check |what'?s |what is |how much )?(my |the )?(free )?(disk space|free space|storage)( is (left|free|used))?"
+     r"( left)?|(how'?s |check )(my |the )?(battery)( level)?|battery( level)?", IntentKind.SYSTEM_QUERY)
+rule(r"(so,? )?(what should i do|what do you (recommend|suggest|advise)|what would you (do|recommend|suggest)|"
+     r"any (advice|suggestions|recommendations)|advise me|what'?s your (advice|recommendation))"
+     r"( (about|with|for|regarding) (?P<target>.+?))?", IntentKind.ADVISE, _t)
+rule(r"(simulate:? .+|what (would|will) happen if .+|what if (i|you|we) .+)", IntentKind.SIMULATE)
+rule(r"(how long (will|would|does|should) .+|when will .+ (finish|be done)|predict .+|estimate how long .+)",
+     IntentKind.PREDICT)
+rule(r"(show( me)?|what'?s|what is|tell me)( the| your)? plan( for (?P<target>.+?))?|what'?s the plan|"
+     r"show( me)? the plan", IntentKind.PLAN_SHOW, _t)
+rule(r"(plan history|(what|which) plans (have you|did you) (run|do)|show( me)? (my |the |recent )?plans|list plans|"
+     r"what did you change (in|about) the plan|what changed in the plan)", IntentKind.PLAN_HISTORY)
+rule(r"((set|change|switch) )?(your |the )?autonomy( level)?( to)? (?P<level>low|normal|high)|"
+     r"(be|work) (more )?(autonomous(ly)?|independent(ly)?)|be more (careful|cautious)|"
+     r"(what'?s|what is) (your|the) autonomy( level)?|autonomy( level)?",
+     IntentKind.AUTONOMY, lambda m: {"level": m.group("level") or ("high" if re.search(
+         r"autonomous|independent", m.group(0), re.I) else "low" if re.search(r"careful|cautious", m.group(0), re.I)
+         else None)})
 
 
 # `py -m jarvis ...`, `python3 -m jarvis ...`, `jarvis runtime stop`: commands that control JARVIS itself. Typed into

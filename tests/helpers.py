@@ -101,3 +101,47 @@ async def wait_until(predicate, timeout: float = 10.0, interval: float = 0.02):
         if loop.time() > deadline:
             raise TimeoutError("condition not met in time")
         await asyncio.sleep(interval)
+
+
+# -- Phase 3 helpers ----------------------------------------------------------------------------------------------
+
+def spawn_cpu_hog() -> int:
+    """A busy process that is *not* a child of the test process (its parent exits at once), like an ordinary
+    application the user is running. JARVIS protects its own process tree, so a direct child wouldn't do."""
+    import subprocess
+    import sys
+    flags = ""
+    if sys.platform == "win32":
+        flags = ", creationflags=0x00000008 | 0x00000200"          # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        flags = ", start_new_session=True"
+    code = ("import subprocess, sys; p = subprocess.Popen([sys.executable, '-c', 'while True: pass'], "
+            f"stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL{flags}); print(p.pid)")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    return int(out.stdout.strip())
+
+
+def kill_pid(pid: int) -> None:
+    import psutil
+    try:
+        psutil.Process(pid).kill()
+    except psutil.Error:
+        pass
+
+
+async def wait_plan(intel, plan_id: str, statuses=None, timeout: float = 20.0):
+    """Wait until a plan reaches one of ``statuses`` (default: any finished state)."""
+    import asyncio
+    from jarvis.intelligence.plans import PLAN_TERMINAL
+    wanted = set(statuses) if statuses is not None else set(PLAN_TERMINAL)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        plan = intel.get(plan_id)
+        if plan is not None and plan.status in wanted:
+            return plan
+        if loop.time() > deadline:
+            raise TimeoutError(f"plan {plan_id} did not reach {sorted(s.value for s in wanted)} "
+                               f"(currently {plan.status.value if plan else 'missing'}: "
+                               f"{plan.status_reason if plan else ''})")
+        await asyncio.sleep(0.05)

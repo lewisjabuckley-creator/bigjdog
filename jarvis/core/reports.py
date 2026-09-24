@@ -8,6 +8,7 @@ stay accurate even when no model is available.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,8 +41,13 @@ def _elapsed(svc: Services, task: Task) -> str:
 # -- activity ------------------------------------------------------------------------------------
 
 def activity(svc: Services) -> str:
-    """Answer to "What are you doing?" — operational status, not chain-of-thought (spec §48)."""
-    open_tasks = svc.tasks.open_tasks()
+    """Answer to "What are you doing?" — operational status, not chain-of-thought (spec §48). Plans are
+    described as plans; the tasks carrying their steps aren't listed a second time."""
+    plan_text = ""
+    if svc.intelligence is not None:
+        from jarvis.intelligence import explain
+        plan_text = explain.activity(svc.intelligence.open_plans())
+    open_tasks = [t for t in svc.tasks.open_tasks() if not t.outputs.get("plan_id")]
     running = [t for t in open_tasks if t.status in EXECUTING and t.kind != TaskKind.MONITOR]
     monitors = [t for t in open_tasks if t.kind == TaskKind.MONITOR and t.status in EXECUTING | {S.QUEUED}]
     waiting = [t for t in open_tasks if t.status == S.WAITING]
@@ -68,6 +74,8 @@ def activity(svc: Services) -> str:
         sentences.append(sentence(f"Blocked: {join_clauses([_label(t) + ' — ' + t.status_reason for t in blocked[:3]])}"))
     elif running or monitors:
         sentences.append("Nothing is blocked.")
+    if plan_text:
+        sentences.insert(0, plan_text)
     if not sentences:
         sentences.append("Nothing is running right now.")
     pending = svc.notifications.pending()
@@ -493,6 +501,53 @@ def _top_process(window_s: float = 0.2) -> str | None:
         return None
 
 
+def system_fact(data: dict[str, Any], question: str) -> str:
+    """One measured number, answered directly ("check my CPU temperature")."""
+    import sys
+    q = question.lower()
+    cpu = data.get("cpu_percent")
+    gpu_asked = bool(re.search(r"\b(gpu|graphics)\b", q))
+    if re.search(r"\btemp", q):
+        key, label = ("gpu_temp_c", "GPU") if gpu_asked else ("cpu_temp_c", "CPU")
+        value = data.get(key)
+        if not isinstance(value, (int, float)):
+            why = " (Windows only exposes it through the manufacturer's tools)" if sys.platform == "win32" else ""
+            text = f"I can't read the {label} temperature on this computer: it doesn't expose that sensor to me{why}."
+            if isinstance(cpu, (int, float)):
+                text += f" CPU use is {cpu:.0f}% right now."
+            return text
+        return f"The {label} is at {value:.0f}°C" + (" — that's hot." if value >= 85 else ".")
+    if gpu_asked:
+        util = data.get("gpu_percent")
+        if not isinstance(util, (int, float)):
+            return "I can't see a GPU I can measure on this computer."
+        vram = f", {data.get('vram_used_gb')} of {data.get('vram_total_gb')} GB of its memory in use" \
+            if data.get("vram_total_gb") else ""
+        return f"The GPU is {util:.0f}% busy{vram}."
+    if re.search(r"\b(ram|memory)\b", q):
+        mem = data.get("memory_percent")
+        if not isinstance(mem, (int, float)):
+            return "I can't read memory use right now."
+        detail = f" ({data['memory_used_gb']} of {data['memory_total_gb']} GB)" if data.get("memory_total_gb") else ""
+        return f"Memory: {mem:.0f}% in use{detail}."
+    if re.search(r"\b(disk|storage|space)\b", q):
+        disk = data.get("disk_percent")
+        if not isinstance(disk, (int, float)):
+            return "I can't read disk use right now."
+        free = f", {data['disk_free_gb']} GB free" if data.get("disk_free_gb") is not None else ""
+        return f"Disk: {disk:.0f}% used{free}."
+    if "battery" in q:
+        level = data.get("battery_percent")
+        if not isinstance(level, (int, float)):
+            return "This computer doesn't report a battery."
+        plugged = " and charging" if data.get("battery_plugged") else ""
+        return f"Battery: {level:.0f}%{plugged}."
+    if isinstance(cpu, (int, float)):
+        cores = f" across {data['cpu_count']} cores" if data.get("cpu_count") else ""
+        return f"CPU use is {cpu:.0f}% right now{cores}."
+    return "I couldn't read that measurement."
+
+
 # -- misc ----------------------------------------------------------------------------------------------
 
 def time_answer(svc: Services) -> str:
@@ -518,7 +573,13 @@ def help_text() -> str:
             "stop, pause, continue, run that again, proceed, no; run the tests, build, $ <command>, "
             "open the <name> project; keep an eye on it, tell me when it's done, watch folder <path>; "
             "remember that ..., forget that, what do you remember about ..., why did we choose ...; "
-            "focus mode, quiet, private mode, emergency mode, normal mode; use the local model, which models. "
+            "focus mode, quiet, private mode, emergency mode, normal mode; use the local model, which models; "
+            "check my CPU temperature / how much memory am I using. "
+            "Goals I plan and carry out step by step, asking before changing anything: my computer is slow — fix "
+            "it; free up disk space; back up <folder> to <folder>; research <topic> in <folder>; several steps "
+            "at once (\"run the tests, and if they pass build it\"). Also: what should I do about ...; what would "
+            "happen if I stopped ...; how long will the tests take; show me the plan; plan history; leave <app> "
+            "alone; set autonomy to low/normal/high. "
             "Anything else goes to the language model with access to my tools.")
 
 

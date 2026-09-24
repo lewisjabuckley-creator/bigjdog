@@ -75,6 +75,9 @@ class PermissionManager:
               paths: list[str] | None = None, project_id: str | None = None, task_id: str | None = None,
               ttl_s: float | None = None, max_uses: int | None = None, reason: str = "",
               created_by: str = "owner") -> Grant:
+        if created_by.startswith("agent:"):
+            # authority flows from the user to agents, never from an agent to anything (itself included)
+            raise PermissionError("an agent cannot grant permissions")
         now = self.clock.now()
         g = Grant(new_id("grant"), subject, PermissionLevel(level), tools or ["*"], paths or [], project_id,
                   task_id, now + ttl_s if ttl_s else None, max_uses, 0, reason, created_by, now)

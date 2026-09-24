@@ -49,13 +49,24 @@ class ProcessListTool(Tool):
             "name": {"type": "string", "default": ""},
             "sort": {"type": "string", "enum": ["cpu", "memory"], "default": "cpu"},
             "limit": {"type": "integer", "default": 15, "minimum": 1},
+            # psutil's first CPU reading for a process is always 0: measure over a window for real figures
+            "sample_s": {"type": "number", "default": 0, "minimum": 0, "maximum": 10},
         }},
         level=PermissionLevel.OBSERVE, idempotent=True, verification="read-only", category="system",
     )
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        import asyncio
         procs = []
         needle = args["name"].lower()
+        sample = float(args.get("sample_s") or 0)
+        if sample > 0:
+            for p in psutil.process_iter():
+                try:
+                    p.cpu_percent(None)
+                except psutil.Error:
+                    pass
+            await asyncio.sleep(sample)
         for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent", "status", "username"]):
             info = p.info
             if needle and needle not in (info.get("name") or "").lower():
@@ -66,7 +77,8 @@ class ProcessListTool(Tool):
         key = "cpu_percent" if args["sort"] == "cpu" else "memory_percent"
         procs.sort(key=lambda p: p[key], reverse=True)
         procs = procs[: args["limit"]]
-        return ToolResult(True, f"{len(procs)} process(es)", {"processes": procs}, provenance=_PROV)
+        return ToolResult(True, f"{len(procs)} process(es)", {"processes": procs, "cpu_count": psutil.cpu_count(),
+                                                             "sampled_s": sample}, provenance=_PROV)
 
 
 class ProcessInspectTool(Tool):

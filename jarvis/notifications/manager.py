@@ -311,13 +311,36 @@ class NotificationManager:
         if rule is None:
             return
         priority, title, body, key = rule
-        self.notify(priority, title, body, source=e.source, task_id=e.task_id, dedupe_key=key)
+        # plan notifications are keyed by the plan, so a result shown in the conversation can be acknowledged
+        subject = e.task_id or (e.entity_id if str(e.entity_id or "").startswith("plan:") else None)
+        self.notify(priority, title, body, source=e.source, task_id=subject, dedupe_key=key)
 
     def _rule(self, e: Event) -> tuple[NotificationPriority, str, str, str | None] | None:
         p = e.payload
         t = e.type
         user_task = str(p.get("created_by", "user")).startswith("user")
         title = p.get("title", "the task")
+        if p.get("plan_id") and t in (EventType.TASK_COMPLETED, EventType.TASK_FAILED, EventType.TASK_BLOCKED,
+                                      EventType.TASK_INTERRUPTED):
+            return None         # a step of a plan: the plan reports (approvals still notify, below)
+        if t == EventType.PLAN_COMPLETED:
+            if str(p.get("created_by", "")).startswith("system:reactions"):
+                return NP.IMPORTANT, f"I looked into it: {p.get('title')}", p.get("result", ""), \
+                    f"plan-done:{p.get('plan_id')}"
+            label = {"failed": "finished, but verification failed", "conflicting": "finished, with conflicting "
+                     "evidence", "partially_verified": "partly done", "unverified": "finished (unverified)"}.get(
+                p.get("quality") or "", "done")
+            return NP.IMPORTANT, f"{_cap(p.get('title', 'the plan'))} {label}", p.get("result", ""), \
+                f"plan-done:{p.get('plan_id')}"
+        if t == EventType.PLAN_FAILED:
+            return (NP.URGENT if user_task else NP.IMPORTANT), f"{_cap(p.get('title', 'the plan'))} didn't succeed", \
+                p.get("reason", ""), f"plan-failed:{p.get('plan_id')}"
+        if t == EventType.PLAN_BLOCKED:
+            return NP.IMPORTANT, f"{_cap(p.get('title', 'the plan'))} needs you", p.get("reason", ""), \
+                f"plan-blocked:{p.get('plan_id')}"
+        if t == EventType.PLAN_PAUSED and str(p.get("by", "")).startswith("system:recovery"):
+            return NP.IMPORTANT, f"{_cap(p.get('title', 'the plan'))} was interrupted", p.get("reason", ""), \
+                f"plan-interrupted:{p.get('plan_id')}"
         if t == EventType.TASK_COMPLETED:
             if p.get("task_kind") == "monitor":
                 return None     # monitors report through MONITOR_TRIGGERED

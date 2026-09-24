@@ -34,6 +34,14 @@ class TaskProfile:
     min_context: int = 0
     interactive: bool = True
     local_only: bool = False
+    # Phase 3: resource- and importance-aware routing
+    priority: int | None = None          # inference queue priority; default: 0 interactive, 2 background
+    max_params_b: float | None = None    # prefer models no larger than this (memory pressure)
+    prefer_loaded: bool = False          # prefer a model that is already in memory
+
+    @property
+    def queue_priority(self) -> int:
+        return self.priority if self.priority is not None else (0 if self.interactive else 2)
 
 
 @dataclass
@@ -90,6 +98,8 @@ class ModelRouter:
         self.last_failure: dict[str, Any] | None = None
         self.last_fallback: dict[str, Any] | None = None
         self._request_seq = 0
+        self.scheduler: Any = None       # InferenceScheduler: concurrency cap and priority queue
+        self.profile_hook: Callable[[TaskProfile], TaskProfile] | None = None   # resource-aware adjustment
 
     # -- inventory ----------------------------------------------------------------
     async def refresh(self) -> list[ModelInfo]:
@@ -163,6 +173,9 @@ class ModelRouter:
             if profile.min_context and m.context_length and m.context_length < profile.min_context:
                 continue
             out.append(m)
+        if profile.max_params_b is not None and need == Capability.CHAT:
+            small = [m for m in out if (m.params_b or 7.0) <= profile.max_params_b]
+            out = small or sorted(out, key=lambda m: m.params_b or 7.0)[:1]   # the smallest, if none fits
         return out
 
     def select(self, profile: TaskProfile) -> RouteDecision:
@@ -202,7 +215,9 @@ class ModelRouter:
         def size(m: ModelInfo) -> float:
             return m.params_b if m.params_b is not None else 7.0
 
-        if profile.complexity == "high":
+        if profile.prefer_loaded:
+            key = lambda m: (not m.loaded, pref_index(m), size(m))
+        elif profile.complexity == "high":
             key = lambda m: (pref_index(m), -size(m))
         else:
             # simple / interactive work: prefer already-loaded, then smaller (faster) models
@@ -240,8 +255,13 @@ class ModelRouter:
             provider = self.providers[provider_name]
             request = self._begin(provider_name, model, profile, stream=False)
             try:
-                response = await provider.chat(model, messages, tools=tools, format=format, options=options,
-                                               timeout=timeout)
+                if self.scheduler is not None:
+                    async with self.scheduler.slot(profile.queue_priority):
+                        response = await provider.chat(model, messages, tools=tools, format=format, options=options,
+                                                       timeout=timeout)
+                else:
+                    response = await provider.chat(model, messages, tools=tools, format=format, options=options,
+                                                   timeout=timeout)
             except ModelError as exc:
                 attempts.append(f"{model}: {exc}")
                 self._record_failure(provider_name, model, exc)
@@ -266,6 +286,8 @@ class ModelRouter:
 
     async def _decide(self, profile: TaskProfile) -> RouteDecision:
         """Select a model, re-probing providers once if none is currently usable (they may have recovered)."""
+        if self.profile_hook is not None:
+            profile = self.profile_hook(profile)
         if not self.inventory:
             await self.refresh()
         try:
@@ -281,6 +303,8 @@ class ModelRouter:
         decision = await self._decide(profile)
         provider = self.providers[decision.provider]
         request = self._begin(decision.provider, decision.model, profile, stream=True)
+        if self.scheduler is not None:
+            await self.scheduler.acquire(profile.queue_priority)
         try:
             async for chunk in provider.stream_chat(decision.model, messages, tools=tools):
                 if chunk.done and chunk.response is not None:
@@ -293,6 +317,8 @@ class ModelRouter:
             self._record_failure(decision.provider, decision.model, exc)
             raise
         finally:
+            if self.scheduler is not None:
+                self.scheduler.release()
             self._end(request)
 
     async def embed(self, texts: list[str]) -> tuple[list[list[float]], str] | None:
@@ -378,6 +404,7 @@ class ModelRouter:
             "calls": self.calls,
             "tokens": dict(self.tokens),
             "last_refresh": self.last_refresh,
+            "inference": self.scheduler.status() if self.scheduler is not None else None,
         }
 
     # -- health tracking ------------------------------------------------------------

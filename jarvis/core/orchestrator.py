@@ -23,6 +23,7 @@ from jarvis.core import personality, reports
 from jarvis.core.context import ContextAssembler, summarize_state_for_tool
 from jarvis.core.intent import Intent, IntentKind, is_pronoun, parse
 from jarvis.core.modes import Mode
+from jarvis.core.plan_dialogue import PlanDialogue
 from jarvis.core.references import ConversationFocus, ReferenceResolver
 from jarvis.core.services import Services
 from jarvis.core.types import OperationalReason, Priority, Provenance, ProvenanceKind, new_id
@@ -102,7 +103,9 @@ class Orchestrator:
         self._token_sink: Callable[[str], None] | None = None
         self.client_cwd: str | None = None      # the interface's working folder (the runtime may run elsewhere)
         self._current_text = ""
+        self._advisory = False                  # "what should I do?": recommend, never act
         self._register_internal_tools()
+        self.plans = PlanDialogue(self)
         self.handlers: dict[IntentKind, Handler] = {
             IntentKind.STATUS: self._status, IntentKind.REENTRY: self._reentry, IntentKind.BRIEFING: self._briefing,
             IntentKind.WHAT_CHANGED: self._what_changed, IntentKind.DIAGNOSE: self._diagnose, IntentKind.WHY: self._why,
@@ -120,7 +123,10 @@ class Orchestrator:
             IntentKind.REPEAT_FOR: self._repeat_for, IntentKind.TIME: self._time, IntentKind.SELF: self._self,
             IntentKind.HELP: self._help, IntentKind.SHORTER: self._shorter, IntentKind.LONGER: self._longer,
             IntentKind.CHAT: self._chat, IntentKind.AWAY: self._away, IntentKind.ANALYZE_PROJECT: self._analyze_project,
-            IntentKind.CLI_COMMAND: self._cli_command,
+            IntentKind.CLI_COMMAND: self._cli_command, IntentKind.SYSTEM_QUERY: self._system_query,
+            IntentKind.ADVISE: self.plans.advise, IntentKind.SIMULATE: self.plans.simulate,
+            IntentKind.PREDICT: self.plans.predict, IntentKind.PLAN_SHOW: self.plans.show,
+            IntentKind.PLAN_HISTORY: self.plans.history, IntentKind.AUTONOMY: self.plans.autonomy,
         }
 
     # -- entry point ------------------------------------------------------------------------
@@ -146,19 +152,11 @@ class Orchestrator:
         svc.notifications.on_user_input()
         svc.bus.emit(Event(EventType.USER_MESSAGE, "conversation", {"chars": len(text)}))
         self._record("user", text)
-        intent: Intent | None = None
         response: Response | None = None
         if self.pending_question:
             response = await self._answer_pending(text)
         if response is None:
-            intent = parse(text)
-            handler = self.handlers.get(intent.kind, self._chat)
-            try:
-                response = await handler(intent)
-            except Exception as exc:
-                log.error("handler_failed", intent=intent.kind.value, error=repr(exc))
-                response = Response(f"Something went wrong while handling that ({exc}). It's logged; nothing else "
-                                    "was affected.", intent.kind, kind="error")
+            response = await self._dispatch(text)
         inline = list(self._inline_tasks)
         self._inline_tasks.clear()
         if response.task_id and response.intent in (IntentKind.SHELL, IntentKind.CHAT):
@@ -172,9 +170,19 @@ class Orchestrator:
                     svc.notifications.acknowledge_task(task.id)   # already reported inline
                     if task.terminal:
                         mark_reported(svc, [task.id])
+        if self.plans.reported_inline:
+            await svc.bus.drain()        # the plan's own completion notice is queued by now: it was just shown
+            for plan_id in self.plans.reported_inline:
+                svc.notifications.acknowledge_task(f"plan:{plan_id}")
+            self.plans.reported_inline.clear()
         if response.kind != "question" and self._may_deliver_queued(response.intent):
             delivered = svc.notifications.drain(limit=3)
             response.notifications = [n for n in delivered if n.title not in response.text]
+        if response.data.get("plan_id"):
+            self.plans.focus_plan = response.data["plan_id"]
+            self.plans.focus_is_plan = True
+        elif response.task_id:
+            self.plans.focus_is_plan = False
         self.focus.last_user_text = text
         self.focus.last_reply = response.text
         if response.intent not in (IntentKind.PROVENANCE,):
@@ -182,6 +190,22 @@ class Orchestrator:
         svc.state.set("session.last_seen", svc.clock.now())
         self._record("assistant", response.text, {"intent": response.intent.value, "model": response.model})
         return response
+
+    async def _dispatch(self, text: str) -> Response:
+        """Understand one request and hand it to its handler."""
+        intent = parse(text)
+        try:
+            if intent.kind in (IntentKind.CHAT, IntentKind.MODIFY_PLAN):
+                # a correction to the plan in progress ("leave Chrome alone", "no, back it up to E:\\")
+                corrected = await self.plans.correct(intent)
+                if corrected is not None:
+                    return corrected
+            handler = self.handlers.get(intent.kind, self._chat)
+            return await handler(intent)
+        except Exception as exc:
+            log.error("handler_failed", intent=intent.kind.value, error=repr(exc))
+            return Response(f"Something went wrong while handling that ({exc}). It's logged; nothing else "
+                            "was affected.", intent.kind, kind="error")
 
     def restore_history(self, limit: int = 40) -> int:
         """Continue this session's conversation after a restart or from another interface."""
@@ -225,6 +249,10 @@ class Orchestrator:
             return None
         if pq.get("entity") == "monitor_spec":
             return await self._monitor_from_answer(text, pq)
+        if pq.get("entity") == "goal_clarify":
+            if parse(text).kind not in (IntentKind.CHAT, IntentKind.OPEN_PROJECT):
+                return None        # a new request (or "cancel"), not an answer
+            return await self.plans.answer_clarification(text, pq)
         lowered = text.lower().strip().rstrip(".!?")
         ordinals = {"1": 0, "first": 0, "the first": 0, "first one": 0, "the first one": 0, "2": 1, "second": 1,
                     "the second": 1, "second one": 1, "the second one": 1, "3": 2, "third": 2, "the third": 2,
@@ -475,6 +503,11 @@ class Orchestrator:
 
     async def _why(self, intent: Intent) -> Response:
         task = self._resolved_task(intent)
+        if task is None and (self.plans.focus_is_plan or (intent.target and not is_pronoun(intent.target)
+                                                           and not self.resolver.task(intent.target).item)):
+            answer = await self.plans.why(intent)
+            if answer is not None:
+                return answer
         if task is None and intent.target and not is_pronoun(intent.target):
             task = self.resolver.task(intent.target).item  # type: ignore[assignment]
         return self._reply(reports.why(self.svc, task), intent,
@@ -491,6 +524,9 @@ class Orchestrator:
     async def _stop(self, intent: Intent) -> Response:
         svc = self.svc
         hard = bool(_HARD_STOP.match(intent.text))
+        stopped = await self.plans.stop(intent, hard)
+        if stopped is not None:
+            return stopped
         verb = "cancel" if hard else "stop"
         target = (intent.target or "").lower()
         if target in ("everything", "all", "all tasks"):
@@ -537,6 +573,10 @@ class Orchestrator:
     async def _resume(self, intent: Intent) -> Response:
         svc = self.svc
         task = self._resolved_task(intent)
+        if task is None:
+            resumed = await self.plans.resume(intent)
+            if resumed is not None:
+                return resumed
         if task is None:
             target = intent.target
             if target and target.lower().strip() in ("project", "the project", "current project"):
@@ -604,6 +644,9 @@ class Orchestrator:
 
     async def _approve(self, intent: Intent) -> Response:
         svc = self.svc
+        planned = await self.plans.approve(intent)
+        if planned is not None:
+            return planned
         pending = svc.approvals.pending()
         if not pending:
             return self._reply("There's nothing waiting for approval.", intent)
@@ -628,11 +671,18 @@ class Orchestrator:
                 svc.tasks.resume_task(approval.task_id, by=svc.user, reason="approved by you")
                 self.focus.touch_task(approval.task_id)
             summaries.append(approval.summary)
+        if len(chosen) == 1:
+            followed = await self.plans.after_approval(chosen[0], intent)
+            if followed is not None:
+                return followed
         return self._reply(f"Proceeding: {personality.join_clauses(summaries)}.", intent, kind="action",
                            task_id=chosen[0].task_id)
 
     async def _deny(self, intent: Intent) -> Response:
         svc = self.svc
+        declined = await self.plans.deny(intent)
+        if declined is not None:
+            return declined
         pending = svc.approvals.pending()
         if not pending:
             return self._reply("Understood.", intent)
@@ -1173,6 +1223,19 @@ class Orchestrator:
                            task_id=clone.id)
 
     # -- misc ---------------------------------------------------------------------------------------------
+    async def _system_query(self, intent: Intent) -> Response:
+        """One live number ("check my CPU temperature"): a single read-only tool call, no planning."""
+        svc = self.svc
+        ctx = ToolContext(actor=Actor.user(svc.user), cwd=self._work_root(), clock=svc.clock,
+                          data_dir=str(svc.config.data_path))
+        execution = await svc.registry.execute("system_info", {}, ctx, reason=OperationalReason(
+            "you asked: " + intent.text[:80], "answer from live measurements", "read system_info"))
+        if not execution.ok or execution.result is None:
+            return self._reply(f"I couldn't read the system's state ({execution.message}).", intent, kind="error")
+        text = reports.system_fact(execution.result.data or {}, intent.text)
+        return self._reply(text, intent, provenance=[Provenance(ProvenanceKind.SYSTEM_STATE, "system_info",
+                                                                "measured just now")])
+
     async def _time(self, intent: Intent) -> Response:
         return self._reply(reports.time_answer(self.svc), intent,
                            provenance=[Provenance(ProvenanceKind.SYSTEM_STATE, "system clock")])
@@ -1251,12 +1314,28 @@ class Orchestrator:
             exclude.add("device_command")
         if profile.complexity != "high":
             exclude.add("delegate_to_agent")
-        names = [t.spec.name for t in svc.registry.list() if t.spec.name not in exclude]
+        names = [t.spec.name for t in svc.registry.list() if t.spec.name not in exclude
+                 and t.spec.category != "planning"]
+        if self._advisory:
+            return svc.registry.model_schemas(names, max_level=0)    # advice: observe only
         return svc.registry.model_schemas(names)
 
-    async def _chat(self, intent: Intent) -> Response:
-        svc = self.svc
+    async def _chat(self, intent: Intent, *, advisory: bool = False) -> Response:
         text = intent.text
+        if not advisory and intent.source == "model":
+            # complexity decides the path: requests that need a plan (or advice, a simulation, a prediction) get
+            # one; everything else is a conversation, as before
+            planned = await self.plans.maybe_goal(intent)
+            if planned is not None:
+                return planned
+        self._advisory = advisory
+        try:
+            return await self._converse(intent, text)
+        finally:
+            self._advisory = False
+
+    async def _converse(self, intent: Intent, text: str) -> Response:
+        svc = self.svc
         if not svc.router.available():
             try:
                 await svc.router.refresh()
@@ -1271,6 +1350,9 @@ class Orchestrator:
                 "without a model.", intent, kind="error")
         assembled = await self.context.build(text, self.history[:-1])
         messages = assembled.messages
+        if self._advisory:
+            messages.insert(1, ChatMessage("system", "The user is asking for advice. Recommend what to do and why; "
+                                                     "you may look things up, but do not change anything."))
         provs = list(assembled.provenance)
         profile = self._profile(text, tools=True)
         try:
@@ -1370,6 +1452,10 @@ class Orchestrator:
                                    f"ran {call.name}")
         call = ToolCall(call.name, self._clean_args(call), call.id)
         tool = svc.registry.get(call.name)
+        if self._advisory and tool is not None and tool.spec.level > 0 and not ctx.dry_run:
+            # advice never acts: anything beyond observing is only previewed
+            from dataclasses import replace
+            ctx = replace(ctx, dry_run=True)
         long_running = bool(tool and tool.spec.long_running)
         if long_running and not ctx.dry_run:
             # durable + interruptible: run it as a task and wait briefly
