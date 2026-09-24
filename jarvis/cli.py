@@ -938,6 +938,19 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         return start()
     if op == "stop":
         return 0 if stop() else 1
+    if op == "kill":
+        # for trying out crash recovery: no checkpoint, no clean-stop record, exactly like a crash
+        info = read_info(data_dir)
+        if info is None or not _is_jarvis_runtime(info.pid):
+            print("The JARVIS runtime is not running.")
+            return 3
+        platform.kill_hard(info.pid)
+        if not platform.wait_gone(info.pid, 10):
+            print(f"Process {info.pid} did not stop.")
+            return 1
+        print(f"Killed the JARVIS runtime (pid {info.pid}) without letting it shut down, as a crash would. The next "
+              "start will notice and recover.")
+        return 0
     if op == "restart":
         if not stop():
             return 1
@@ -993,7 +1006,7 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         if not definition.tested:
             print(f"Note: the {platform.name} service definition has not been tested on {platform.name} yet.")
         return 0
-    print("usage: jarvis runtime start|stop|restart|status|health|logs|run|install-service")
+    print("usage: jarvis runtime start|stop|restart|status|health|logs|run|install-service|kill")
     return 2
 
 
@@ -1099,7 +1112,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("approvals", help="pending approvals")
     sub.add_parser("grants", help="active delegated authority")
     rt = sub.add_parser("runtime", help="manage the persistent runtime")
-    rt.add_argument("op", choices=["start", "stop", "restart", "status", "health", "logs", "run", "install-service"])
+    rt.add_argument("op", choices=["start", "stop", "restart", "status", "health", "logs", "run", "install-service",
+                                   "kill"],
+                    help="kill: stop it instantly, as a crash would (to try out crash recovery)")
     rt.add_argument("--foreground", action="store_true", help="start: run in this terminal")
     rt.add_argument("-n", "--lines", type=int, default=50, help="logs: how many lines")
     rt.add_argument("-f", "--follow", action="store_true", help="logs: keep following")

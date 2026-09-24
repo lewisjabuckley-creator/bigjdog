@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from jarvis import __version__
 from jarvis.core import reports
-from jarvis.core.awareness import away_report, latest_briefing, prepare_briefing
+from jarvis.core.awareness import away_report, latest_briefing, mark_announced, prepare_briefing
 from jarvis.core.types import Priority, Severity
 from jarvis.log import get_logger
 from jarvis.notifications.manager import Notification
@@ -473,9 +473,11 @@ class ApiServer:
             queued = [n for n in svc.notifications.pending()]
             report = away_report(svc, since=ret.away_since, until=svc.clock.now())
             svc.notifications.mark_delivered(queued)       # shown by the interface now
+            # each finished task is mentioned on one return only; its result stays in the full "away" answer
+            fresh = [t for t in report.finished if not t.get("announced")]
+            mark_announced(svc, [t["id"] for t in fresh])
             returning = {"away_since": ret.away_since, "notifications": [n.text() for n in queued],
-                         "finished": [{"id": t["id"], "title": t["title"], "status": t["status"]}
-                                      for t in report.finished],
+                         "finished": [{"id": t["id"], "title": t["title"], "status": t["status"]} for t in fresh],
                          "waiting": [{"id": t["id"], "title": t["title"], "status": t["status"],
                                       "reason": t["status_reason"]} for t in report.open
                                      if t["status"] in ("waiting", "blocked", "paused")],

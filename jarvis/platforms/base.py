@@ -60,7 +60,7 @@ class InstanceLock:
             fh.close()
             raise LockHeld(self.path, read_pid(self.path.with_suffix(".pid"))) from None
         self._fh = fh
-        self.path.with_suffix(".pid").write_text(str(os.getpid()))
+        self.path.with_suffix(".pid").write_text(f"{os.getpid()}\n")
         return self
 
     def release(self) -> None:
@@ -138,6 +138,13 @@ class Platform:
             except psutil.TimeoutExpired:
                 return False
             return True
+
+    def kill_hard(self, pid: int) -> None:
+        """Stop a process immediately, with no chance to clean up (SIGKILL / TerminateProcess)."""
+        try:
+            psutil.Process(pid).kill()
+        except psutil.NoSuchProcess:
+            pass
 
     def wait_gone(self, pid: int, timeout: float) -> bool:
         deadline = time.monotonic() + timeout

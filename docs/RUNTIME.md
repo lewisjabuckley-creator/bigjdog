@@ -23,6 +23,7 @@ when you exit.
 | `jarvis runtime start` | Start the runtime in the background. `--foreground` runs it in this terminal. |
 | `jarvis runtime stop` | Stop it cleanly: running tasks are checkpointed first. Waits up to 45 s, then forces it. |
 | `jarvis runtime restart` | Stop, then start. |
+| `jarvis runtime kill` | Stop it instantly with no checkpoint, as a crash would. For trying out crash recovery. |
 | `jarvis runtime status` | Running or not, pid, uptime, health, open tasks, model, attached interfaces, JARVIS's own memory and CPU. When it isn't running, how the last run ended (clean or unexpected). |
 | `jarvis runtime health` | The full health check (see below). Exit code 1 if anything is critical or offline. |
 | `jarvis runtime logs [-n 50] [-f] [--structured]` | The runtime's console log, or the structured JSON log. Works when the runtime is down. |

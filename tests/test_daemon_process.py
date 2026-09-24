@@ -142,7 +142,8 @@ def test_kill_9_mid_step_is_detected_and_the_step_is_not_blindly_repeated(runtim
         task_id = created["task"]["id"]
         _wait(lambda: (client.get(f"/v1/tasks/{task_id}")["task"]["current_step"] or {}).get("status") == "running")
         pid = client.info.pid
-    os.kill(pid, signal.SIGKILL)                         # no shutdown, no checkpoint: a crash
+    killed = jarvis(config, "runtime", "kill")          # no shutdown, no checkpoint: a crash
+    assert killed.returncode == 0 and f"Killed the JARVIS runtime (pid {pid})" in killed.stdout
     _wait(lambda: read_info(data) is None, 10)
     down = jarvis(config, "runtime", "status")
     assert down.returncode == 3 and "stopped unexpectedly" in down.stdout

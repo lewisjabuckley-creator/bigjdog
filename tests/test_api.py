@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from jarvis.service.api import ApiServer
-from jarvis.tasks.models import TaskStatus
+from jarvis.tasks.models import Step, TaskStatus
 from tests.helpers import make_runtime, wait_until
 
 S = TaskStatus
@@ -207,3 +207,17 @@ async def test_stop_request_reaches_the_daemon(tmp_path):
         assert (await client.post("/v1/runtime/stop")).status_code == 202
         await wait_until(lambda: server.on_stop is not None and rt.started)
         await asyncio.sleep(0.2)
+
+
+async def test_the_return_summary_mentions_a_result_once_not_on_every_open(tmp_path):
+    async with api(tmp_path) as (client, rt, sim, server):
+        svc = rt.svc
+        task = svc.tasks.create_task("ping it", created_by="user:owner", steps=[Step("t", "time_now", {})])
+        await svc.pool.wait_for(task.id)
+        first = (await client.post("/v1/sessions/attach", json={"kind": "cli"})).json()
+        assert [t["title"] for t in first["returning"]["finished"]] == ["ping it"]
+        await client.post("/v1/sessions/detach", json={"client_id": first["client_id"]})
+        again = (await client.post("/v1/sessions/attach", json={"kind": "cli"})).json()
+        assert again["returning"]["finished"] == []                   # already mentioned on the last return
+        answer = await rt.orchestrator().handle("What happened while I was away?")
+        assert "ping it — completed" in answer.text                  # but the full answer still has it

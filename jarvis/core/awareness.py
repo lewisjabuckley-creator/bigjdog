@@ -194,6 +194,19 @@ def unreported_results(svc: Services, days: float = 3.0, limit: int = 5) -> list
             if t.kind != TaskKind.MONITOR and t.created_by.startswith("user") and not t.outputs.get(REPORTED)][:limit]
 
 
+ANNOUNCED = "result_announced_at"
+
+
+def mark_announced(svc: Services, task_ids: list[str]) -> None:
+    """The user has been told these finished (the one-line summary on return), not yet what they produced."""
+    now = svc.clock.now()
+    for task_id in task_ids:
+        task = svc.tasks.get_task(task_id)
+        if task is not None and task.terminal and not task.outputs.get(ANNOUNCED):
+            task.outputs[ANNOUNCED] = now
+            svc.tasks.save(task)
+
+
 def mark_reported(svc: Services, task_ids: list[str]) -> None:
     """The user has now been told these outcomes (in a reply or a "while you were away" answer)."""
     now = svc.clock.now()
@@ -207,6 +220,7 @@ def mark_reported(svc: Services, task_ids: list[str]) -> None:
 def _task_brief(task: Task) -> dict[str, Any]:
     api = task.to_api()
     return {"id": task.id, "title": task.title, "status": task.status.value,
+            "announced": bool(task.outputs.get(ANNOUNCED)),
             "outcome": task.outcome.value if task.outcome else None, "status_reason": task.status_reason,
             "result": api["result"] if task.status == S.COMPLETED else "", "error": task.error,
             "finished_at": task.finished_at, "progress": api["progress"], "artifacts": task.artifacts[-5:]}
