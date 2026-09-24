@@ -85,15 +85,26 @@ class AwayReport:
             return f"{head}: nothing happened. No tasks ran, nothing needs you and there were no alerts. " + \
                 " ".join(lines)
         if self.finished:
-            lines.append("Finished:")
-            for i, t in enumerate(self.finished):
-                status = t["status"] if t.get("outcome") in (None, "complete", "failed") else \
-                    f"{t['status']} ({t['outcome']})"
-                lines.append(f"• {t['title']} — {status} at {_when(t['finished_at'], self.now)}.")
-                if t["status"] == "completed" and t.get("result") and i < 3:
-                    lines += ["    " + ln for ln in _clip(t["result"]).splitlines()]
-                elif t["status"] != "completed" and (t.get("error") or t.get("status_reason")):
-                    lines.append(f"    {t.get('status_reason') or t.get('error')}")
+            # full results for the most recent few; the rest can be opened with /task <id>
+            with_result = [t for t in self.finished if t["status"] == "completed" and t.get("result")]
+            shown = {t["id"] for t in sorted(with_result, key=lambda t: t["finished_at"])[-3:]}
+            in_window = [t for t in self.finished if self.since <= t["finished_at"] <= end]
+            earlier = [t for t in self.finished if t not in in_window]
+            for heading, group in (("Finished:", in_window),
+                                   ("Finished earlier, not reported to you until now:", earlier)):
+                if not group:
+                    continue
+                lines.append(heading)
+                for t in group:
+                    status = t["status"] if t.get("outcome") in (None, "complete", "failed") else \
+                        f"{t['status']} ({t['outcome']})"
+                    lines.append(f"• {t['title']} — {status} at {_when(t['finished_at'], self.now)}.")
+                    if t["id"] in shown:
+                        lines += ["    " + ln for ln in _clip(t["result"]).splitlines()]
+                    elif t["status"] == "completed" and t.get("result"):
+                        lines.append(f"    (full result: /task {t['id']})")
+                    elif t["status"] != "completed" and (t.get("error") or t.get("status_reason")):
+                        lines.append(f"    {t.get('status_reason') or t.get('error')}")
         if self.open:
             lines.append("Still open:")
             for t in self.open:

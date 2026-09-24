@@ -8,6 +8,7 @@ dumped wholesale into the prompt.
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -80,7 +81,7 @@ class ContextAssembler:
                                            use_sir=svc.config.ui.use_sir, mode=eff.mode.value,
                                            capabilities=CAPABILITIES)
         provs = [Provenance(ProvenanceKind.SYSTEM_STATE, "live state")]
-        blocks = [system, "LIVE STATE (observed just now):\n" + self.live_state()]
+        blocks = [system, "COMPUTER: " + environment_note(), "LIVE STATE (observed just now):\n" + self.live_state()]
         project = svc.projects.active()
         memory_ids: list[str] = []
         if svc.config.memory.enabled:
@@ -112,6 +113,20 @@ class ContextAssembler:
             messages.append(ChatMessage(past.role, content))
         messages.append(ChatMessage("user", user_text))
         return AssembledContext(messages, provs, memory_ids)
+
+
+def environment_note() -> str:
+    """Which operating system and shell the tools act on, so the model doesn't reach for `ps aux` on Windows."""
+    import platform
+    system = platform.system() or sys.platform
+    release = platform.release()
+    if sys.platform == "win32":
+        return (f"{system} {release}. shell_execute runs commands in cmd.exe: use Windows commands (dir, type, "
+                "tasklist, where, findstr, ipconfig), not Unix ones (ls, cat, ps, grep). For memory, CPU, disk and "
+                "processes prefer the system_info and process_list tools over shell commands.")
+    shell = "zsh or sh" if sys.platform == "darwin" else "sh"
+    return (f"{system} {release}. shell_execute runs commands in {shell}. For memory, CPU, disk and processes prefer "
+            "the system_info and process_list tools over shell commands.")
 
 
 def summarize_state_for_tool(svc: Services, section: str) -> dict:

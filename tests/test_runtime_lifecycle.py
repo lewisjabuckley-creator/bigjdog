@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+import sys
 import time
 
 import pytest
@@ -620,3 +621,44 @@ def test_recovery_messages_say_continue_once():
 def test_control_characters_never_reach_jarvis():
     from jarvis.cli import _clean_input
     assert _clean_input("\x01") == "" and _clean_input(" what's up?\x01 ") == "what's up?"
+
+
+async def test_the_model_is_told_which_operating_system_it_works_on(tmp_path, monkeypatch):
+    from jarvis.core.context import environment_note
+    rt, sim = make_runtime(str(tmp_path))
+    await rt.start()
+    try:
+        await rt.orchestrator().handle("What's using the most memory right now?")
+        system = sim.provider.calls[0]["messages"][0].content
+        assert "COMPUTER: " in system and "system_info and process_list" in system
+    finally:
+        await rt.stop()
+    monkeypatch.setattr(sys, "platform", "win32")
+    note = environment_note()
+    assert "cmd.exe" in note and "tasklist" in note and "not Unix ones" in note
+
+
+async def test_the_away_answer_shows_the_newest_results_and_labels_the_catch_up(tmp_path):
+    rt, _ = make_runtime(str(tmp_path), mode="daemon")
+    await rt.start()
+    try:
+        svc = rt.svc
+        ids = []
+        for i in range(5):
+            t = svc.tasks.create_task(f"job {i}", created_by="user:owner", steps=[Step("t", "time_now", {})])
+            done = await svc.pool.wait_for(t.id)
+            done.result = f"RESULT {i}"
+            svc.tasks.save(done)
+            ids.append(done.id)
+        report = away_report(svc, since=svc.clock.now() + 1, until=svc.clock.now() + 60)   # all finished earlier
+        text = report.text()
+        assert "Finished earlier, not reported to you until now:" in text
+        assert "RESULT 4" in text and "RESULT 3" in text and "RESULT 2" in text          # the newest three in full
+        assert "RESULT 0" not in text and f"(full result: /task {ids[0]})" in text
+    finally:
+        await rt.stop()
+
+
+def test_reports_are_plain_text_for_the_terminal():
+    from jarvis.tools.internal import plain_text
+    assert plain_text("**Overview**\n## Next\n* a **b** c\n- d\n2*3 and a_b") == "Overview\nNext\n• a b c\n• d\n2*3 and a_b"

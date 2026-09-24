@@ -108,6 +108,18 @@ class LiveStateTool(Tool):
                           provenance=Provenance(ProvenanceKind.SYSTEM_STATE, "live state"))
 
 
+def plain_text(text: str) -> str:
+    """Markdown the model used anyway (**bold**, # headings, * bullets) as plain text for a terminal."""
+    import re
+    out = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)                 # headings
+        line = re.sub(r"^(\s*)[*+-]\s+", r"\1• ", line)                # bullets
+        line = re.sub(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", r"\2", line)     # bold
+        out.append(line)
+    return "\n".join(out)
+
+
 _REPORT_SYSTEM = (
     "You are JARVIS writing a report for your user. Use only the material provided: it was measured by JARVIS's "
     "own tools. Do not invent files, numbers or features that are not in it; if something cannot be determined "
@@ -152,7 +164,7 @@ class ModelReportTool(Tool):
         except ModelError as exc:
             return ToolResult(False, f"no language model is available to write the report ({exc})",
                               error="model_unavailable")
-        report = strip_thinking(routed.response.content or "").strip()
+        report = plain_text(strip_thinking(routed.response.content or "").strip())
         if not report:
             return ToolResult(False, f"{routed.response.model} returned an empty report", error="empty_report")
         first = report.splitlines()[0][:160]
