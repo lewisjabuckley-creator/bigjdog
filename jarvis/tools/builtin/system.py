@@ -117,6 +117,15 @@ class ProcessStopTool(Tool):
         reversible=False, verification="process no longer running", category="system",
     )
 
+    def preview(self, args: dict[str, Any]) -> str:
+        pid = args.get("pid")
+        try:
+            name = psutil.Process(int(pid)).name()
+        except (psutil.Error, TypeError, ValueError):
+            name = None
+        what = f"{name} (PID {pid})" if name else f"process {pid}"
+        return f"{'force-stop' if args.get('force') else 'stop'} {what}"
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         if args["pid"] in (0, 1, os.getpid()):
             return ToolResult(False, "refusing to stop a protected process", error="protected")

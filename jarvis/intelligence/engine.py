@@ -227,6 +227,8 @@ class PlanEngine:
             for node in plan.active_nodes():
                 if node.task_id:
                     self.tasks.pause_task(node.task_id, by=by, reason=reason or f"plan paused by {by}")
+                    # a paused plan asks nothing: its approval question is withdrawn and asked again on resume
+                    self.approvals.cancel_for_task(node.task_id)
             plan.paused_by = by
             self._set(plan, P.PAUSED, reason or f"paused by {by}", by=by)
             self.store.save(plan)
@@ -841,6 +843,10 @@ class PlanEngine:
             label = f"{c['tool'].split('_')[-1]}ping {target}" if c["tool"] == "process_stop" and target else c["title"]
             decision["actions"].append({"key": c["key"], "identity": action_identity(c), "title": c["title"],
                                         "label": label, "node": act_id, "outcome": None})
+            if c["tool"] == "file_delete" and (c.get("args") or {}).get("path"):
+                plan.assumptions.append(Assumption(
+                    f"{os.path.basename(str(c['args']['path']))} is still there",
+                    {"type": "path_exists", "path": c["args"]["path"]}, [act_id]))
             if c["tool"] == "process_stop" and (c.get("args") or {}).get("pid"):
                 plan.assumptions.append(Assumption(
                     f"{(c.get('meta') or {}).get('target')} (PID {c['args']['pid']}) is still running",
@@ -996,6 +1002,12 @@ class PlanEngine:
             target = plan.node(entry["node"])
             if target is None or target.finished:
                 continue
+            gone = self._target_gone(plan, target)
+            if gone:
+                # the file was removed or the process exited since the analysis: nothing to ask about
+                target.status = N.SKIPPED
+                target.note = f"no longer needed: {gone}"
+                continue
             refused = None
             for s in target.steps:
                 ex = await self.registry.execute(s["tool"], self._resolve(plan, s.get("args") or {}), ctx,
@@ -1024,6 +1036,18 @@ class PlanEngine:
         gate.gate_for = [e["node"] for e in kept]
         gate.meta["expected"] = kept
         return True
+
+    def _target_gone(self, plan: Plan, node: PlanNode) -> str | None:
+        """For a deletion or a process stop: the evidence that its target no longer exists, else None."""
+        if not any(s["tool"] in ("file_delete", "process_stop") for s in node.steps):
+            return None
+        for a in plan.assumptions:
+            if node.id in a.affects and (a.check or {}).get("type") in ("path_exists", "process_running"):
+                holds, evidence = self._evaluate_assumption(plan, a)
+                if holds is False:
+                    a.status, a.evidence, a.checked_at = "invalid", evidence, self.clock.now()
+                    return evidence
+        return None
 
     def _grant_approved(self, plan: Plan, node: PlanNode, task: Task) -> None:
         """Approved actions get exactly the authority the user approved: single-use, scoped to this task and tool,
@@ -1177,6 +1201,7 @@ class PlanEngine:
                        "quality": plan.quality.value if plan.quality else None}
             if status in (P.COMPLETED, P.FAILED):
                 payload["result"] = _first_line(plan.result, 200)
+                payload["more"] = len((plan.result or "").strip().splitlines()) > 1   # details on request
             severity = Severity.WARNING if status in (P.FAILED, P.BLOCKED) else Severity.INFO
             self._emit(etype, plan, payload, severity)
 

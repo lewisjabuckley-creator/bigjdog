@@ -475,6 +475,11 @@ def _attach(client: Any, session: str, client_id: str | None = None) -> dict[str
     return client.post("/v1/sessions/attach", {"kind": "cli", "session": session, "client_id": client_id})
 
 
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def _returning_lines(att: dict[str, Any], skip: set[str] | None = None) -> list[str]:
     ret = att.get("returning")
     if not ret:
@@ -491,22 +496,64 @@ def _returning_lines(att: dict[str, Any], skip: set[str] | None = None) -> list[
             lines.append(f"● {text}")
     waiting = [t for t in ret.get("waiting") or [] if t["id"] not in skip]     # recovery notes are shown above
     if waiting:
-        lines.append("Waiting on you: " + "; ".join(f"{t['title']} ({t['reason'] or t['status']})"
+        lines.append("Waiting on you: " + "; ".join(f"{_clip(t['title'], 60)} ({_clip(t['reason'] or t['status'], 70)})"
                                                    for t in waiting[:3]) + ".")
     if lines:
         lines.append("Ask \"what happened while I was away?\" for the details.")
     return lines
 
 
+def _connect_interactive(args: argparse.Namespace) -> Any | None:
+    """Connect for a conversation. A runtime that doesn't answer, or one running a different copy of JARVIS
+    (an older version, or code from another folder), is offered a restart instead of a dead end."""
+    from jarvis.service.client import RuntimeNotRunning, RuntimeUnresponsive, mismatch
+    cfg, _ = resolve_config(args)
+    try:
+        client = _client(args, auto_start=True)
+    except RuntimeUnresponsive as exc:
+        print(f"{_cap(str(exc).split('. Restart')[0])}.")
+        if not _confirm("Restart it now? Its tasks will be recovered when it starts again."):
+            print("You can restart it any time with: py -m jarvis runtime restart")
+            return None
+        if not _stop_runtime(cfg.data_path, pid=exc.pid):
+            return None
+        try:
+            client = _client(args, auto_start=True)
+        except RuntimeNotRunning as again:
+            print(f"Couldn't start the JARVIS runtime: {again}")
+            return None
+    except RuntimeNotRunning as exc:
+        print(f"Couldn't start the JARVIS runtime: {exc}\nIf this keeps happening, `py -m jarvis --embedded` runs "
+              "JARVIS inside this window instead.")
+        return None
+    different = mismatch(client.info)
+    if different:
+        print(f"Note: {different}.")
+        if _confirm("Restart it now so you're using this version? Running tasks are checkpointed and resume."):
+            client.close()
+            if not _stop_runtime(cfg.data_path):
+                return None
+            try:
+                client = _client(args, auto_start=True)
+            except RuntimeNotRunning as exc:
+                print(f"Couldn't start the JARVIS runtime: {exc}")
+                return None
+        else:
+            print("Carrying on with the running version (`py -m jarvis runtime restart` switches later).")
+    return client
+
+
+def _cap(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
 def interactive_client(args: argparse.Namespace) -> int:
     import httpx
 
-    from jarvis.service.client import ApiFailure, RuntimeNotRunning
+    from jarvis.service.client import ApiFailure
     prompt = "you › "
-    try:
-        client = _client(args, auto_start=True)
-    except RuntimeNotRunning as exc:
-        print(f"Couldn't start the JARVIS runtime: {exc}\nTry `jarvis --embedded` to run it inside this window.")
+    client = _connect_interactive(args)
+    if client is None:
         return 1
     att = _attach(client, args.session)
     client_id = att["client_id"]
@@ -625,8 +672,16 @@ def _via_runtime_or_embedded(args: argparse.Namespace, api: Any, embedded: Any) 
     client = None if args.embedded else _running_client(args)
     if client is None:
         return asyncio.run(embedded(args))
+    _mismatch_notice(client)
     with client:
         return api(client)
+
+
+def _mismatch_notice(client: Any) -> None:
+    from jarvis.service.client import mismatch
+    different = mismatch(client.info)
+    if different:
+        print(f"Note: {different}. `py -m jarvis runtime restart` switches to this version.", file=sys.stderr)
 
 
 def client_ask(args: argparse.Namespace) -> int:
@@ -636,6 +691,7 @@ def client_ask(args: argparse.Namespace) -> int:
     except RuntimeNotRunning as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    _mismatch_notice(client)
     with client:
         data = client.converse(" ".join(args.text), request_id=uuid.uuid4().hex, session=args.session,
                                cwd=os.getcwd())
@@ -953,31 +1009,26 @@ def _answering_info(data_dir: Path) -> Any:
 
 
 def _is_jarvis_runtime(pid: int) -> bool:
-    import psutil
-    try:
-        cmdline = " ".join(psutil.Process(pid).cmdline())
-    except (psutil.Error, OSError):
-        return False
-    return "jarvis" in cmdline and "runtime" in cmdline
+    from jarvis.service.client import is_jarvis_process
+    return is_jarvis_process(pid)
 
 
-def cmd_runtime(args: argparse.Namespace) -> int:
+def _stop_runtime(data_dir: Path, *, pid: int | None = None) -> bool:
+    """Stop the runtime for a data directory: politely through its API (tasks are checkpointed), else by
+    terminating the process. ``pid`` names a runtime that holds the data directory without a record."""
     from jarvis.platforms import current as current_platform
-    from jarvis.service.client import Client, RuntimeNotRunning, launch, read_info, runtime_log
-    cfg, config_file = resolve_config(args)
-    data_dir = cfg.data_path
+    from jarvis.service.client import Client, read_info
     platform = current_platform()
-    op = args.op
-
-    if op == "run" or (op == "start" and args.foreground):
-        from jarvis.service.daemon import run_daemon
-        return run_daemon(cfg, simulate=args.simulate, log_to_stderr=args.verbose)
-
-    def stop() -> bool:
-        info = read_info(data_dir)
-        if info is None:
-            print("The JARVIS runtime is not running.")
-            return True
+    info = read_info(data_dir)
+    if info is None and pid is not None and _is_jarvis_runtime(pid):
+        print(f"Stopping the unresponsive JARVIS runtime (process {pid})…")
+        platform.terminate(pid)
+        target = pid
+    elif info is None:
+        print("The JARVIS runtime is not running.")
+        return True
+    else:
+        target = info.pid
         try:
             with Client(info, timeout=10) as client:
                 client.post("/v1/runtime/stop")
@@ -987,12 +1038,42 @@ def cmd_runtime(args: argparse.Namespace) -> int:
                 return True
             print(f"The runtime didn't answer ({exc}); stopping process {info.pid}.")
             platform.terminate(info.pid)
-        if platform.wait_gone(info.pid, 45):
-            print(f"Stopped the JARVIS runtime (pid {info.pid}); running tasks were checkpointed.")
-            return True
-        print(f"The runtime (pid {info.pid}) did not stop in time; forcing it. Interrupted steps will be "
-              "reviewed when it next starts.")
-        return platform.terminate(info.pid, timeout=5)
+    if platform.wait_gone(target, 45):
+        print(f"Stopped the JARVIS runtime (pid {target}); running tasks were checkpointed.")
+        return True
+    print(f"The runtime (pid {target}) did not stop in time; forcing it. Interrupted steps will be "
+          "reviewed when it next starts.")
+    return platform.terminate(target, timeout=5)
+
+
+def _confirm(question: str) -> bool:
+    """Ask a yes/no question in the terminal (yes by default). Without a terminal, the answer is no."""
+    if not sys.stdin or not sys.stdin.isatty():
+        return False
+    try:
+        answer = input(f"{question} [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in ("", "y", "yes", "ok", "sure")
+
+
+def cmd_runtime(args: argparse.Namespace) -> int:
+    from jarvis.platforms import current as current_platform
+    from jarvis.service.client import Client, RuntimeNotRunning, RuntimeUnresponsive, launch, read_info, runtime_log
+    cfg, config_file = resolve_config(args)
+    data_dir = cfg.data_path
+    platform = current_platform()
+    op = args.op
+
+    if op == "run" or (op == "start" and args.foreground):
+        from jarvis.service.daemon import run_daemon
+        return run_daemon(cfg, simulate=args.simulate, log_to_stderr=args.verbose)
+
+    held_by: dict[str, int] = {}
+
+    def stop() -> bool:
+        return _stop_runtime(data_dir, pid=held_by.get("pid"))
 
     def start() -> int:
         info = _answering_info(data_dir)
@@ -1001,6 +1082,10 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             return 0
         try:
             info = launch(config=config_file, data_dir=data_dir, simulate=args.simulate)
+        except RuntimeUnresponsive as exc:
+            held_by["pid"] = exc.pid
+            print(f"error: {exc}")
+            return 1
         except RuntimeNotRunning as exc:
             print(f"error: {exc}")
             return 1
@@ -1027,7 +1112,13 @@ def cmd_runtime(args: argparse.Namespace) -> int:
     if op == "restart":
         if not stop():
             return 1
-        return start()
+        code = start()
+        if code and held_by.get("pid"):
+            # a runtime without a record held the data directory: stop that one too, then start again
+            if not _stop_runtime(data_dir, pid=held_by["pid"]):
+                return 1
+            code = start()
+        return code
     if op == "status":
         info = _answering_info(data_dir)
         if info is None:

@@ -330,7 +330,10 @@ class NotificationManager:
             label = {"failed": "finished, but verification failed", "conflicting": "finished, with conflicting "
                      "evidence", "partially_verified": "partly done", "unverified": "finished (unverified)"}.get(
                 p.get("quality") or "", "done")
-            return NP.IMPORTANT, f"{_cap(p.get('title', 'the plan'))} {label}", p.get("result", ""), \
+            body = p.get("result", "")
+            if p.get("more"):
+                body = (body.rstrip() + " " if body else "") + "Say 'what did you find?' for the details."
+            return NP.IMPORTANT, f"{_cap(p.get('title', 'the plan'))} {label}", body, \
                 f"plan-done:{p.get('plan_id')}"
         if t == EventType.PLAN_FAILED:
             return (NP.URGENT if user_task else NP.IMPORTANT), f"{_cap(p.get('title', 'the plan'))} didn't succeed", \

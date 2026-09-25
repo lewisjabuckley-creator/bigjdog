@@ -148,6 +148,11 @@ class Replanner:
             node.status = N.SKIPPED
             node.note = f"no longer needed: {assumption.evidence}"
             return [f"skipped '{node.title}': {assumption.evidence}"]
+        if kind == "path_exists" and node.kind == NodeKind.ACTION and \
+                any(s["tool"] == "file_delete" for s in node.steps):
+            node.status = N.SKIPPED
+            node.note = f"no longer needed: it's already gone ({assumption.evidence})"
+            return [f"skipped '{node.title}': it's already gone"]
         return []                 # a missing folder or drive needs the user: the engine blocks and asks
 
     # -- the user corrected something ---------------------------------------------------------------------------

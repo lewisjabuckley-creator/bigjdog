@@ -580,13 +580,15 @@ class GoalParser:
                                  f"Where should I back up {goal.target} to?")
         if goal.kind == "disk_cleanup" and not goal.target:
             return Ambiguity(AmbiguityClass.RECOVERABLE, "where to clean up",
-                             assumption="I'll look at the whole home folder and only recommend what to remove; "
-                                        "deleting anything needs your approval")
+                             assumption="I'll look at the whole home folder; only old files in Downloads and temp "
+                                        "are candidates, and deleting anything needs your approval" if goal.wants_fix
+                             else "I'll look at the whole home folder and only recommend what to remove; deleting "
+                                  "anything needs your approval")
         if goal.kind == "performance":
             return None
         if re.search(r"\b(make\s+it\s+better|improve\s+it|fix\s+it|sort\s+it)\b", text, re.I) and goal.kind == "generic":
             return Ambiguity(AmbiguityClass.HARMLESS, "what 'it' refers to",
-                             assumption="the thing we were just talking about")
+                             assumption="I'm taking 'it' to mean the thing we were just talking about")
         return None
 
     @staticmethod

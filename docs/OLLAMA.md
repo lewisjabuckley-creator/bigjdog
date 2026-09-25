@@ -34,7 +34,7 @@ The first time, this starts the JARVIS runtime in the background ("Starting the 
 background…"). The first line tells you what it found, for example:
 
 ```text
-JARVIS 0.2.0 — connected to the runtime (pid 4120). Talking through llama3.1:8b (local, tools enabled).
+JARVIS 0.3.0 — connected to the runtime (pid 4120). Talking through llama3.1:8b (local, tools enabled).
 ```
 
 If Ollama isn't running, or no model is installed, JARVIS tells you exactly what to do. Everything that doesn't

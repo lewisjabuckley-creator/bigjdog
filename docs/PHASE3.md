@@ -277,17 +277,26 @@ haven't repeated it") until you say "continue". Completed nodes are never re-run
 |---|---|
 | "Check my CPU temperature" | One measurement, answered directly; honest when the sensor isn't available. |
 | "My computer is slow — find out why and fix it" | A plan. Within seconds, the evidence and one question: "I'd like to stop X (PID n) (can't be undone). Proceed?" |
-| "yes" / "no" | Approves or declines that change; after "yes", the verified result. |
+| "yes" / "no" (also "sure, proceed", "ok go ahead", "yes please") | Approves or declines that change; after "yes", the verified result. A "yes" only starts a fix when the previous reply offered one. |
 | "What are you doing?" | Plan status from the record: step n of m, what it's working on or waiting for. |
 | "Why did you do that?" | The decision, the evidence, what was ruled out, who approved it and when, what verification found. |
 | "What should I do about ...?" | Advice: it looks, recommends, changes nothing. Then "fix it" does the first recommendation, asking first. |
 | "What would happen if I stopped Chrome?" | A simulation from current measurements, labelled as an estimate. |
 | "How long will the tests take?" | A prediction from earlier runs, or "I have nothing to estimate from". |
-| "dry run: free up disk space" | Observes for real, lists the changes it would make and which would need approval, changes nothing. |
+| "dry run: free up disk space" | Observes for real, lists the changes it would make and which would need approval, changes nothing. The plan's title starts with "Dry run:". |
+| "what are these files?" / "what did you find?" / "tell me more" | The full findings of the plan in focus, from the record (every candidate with its size and age), never a model's guess. After an investigation it offers the fix: "Say 'go ahead' and I'll move them to JARVIS's trash, asking you first." |
+| "cancel all deletes", "cancel the free up disk space process", `cancel task "free up disk space"`, "pause free up disk space", "cancel that" | Stops the open plan it names, by title or by what it does ("deletes" means a disk clean-up; "all" means every match). Control phrases never start a plan and never go to the model. If nothing matches, the reply says so, changes nothing and lists what is open. A plan that already ended is named as such. |
+| The same request twice | "I'm already on that", with the open plan's status or its pending question; no second plan. |
 | "leave Chrome alone" / "no, back it up to E:\ instead" / "skip the summary" | A correction: the plan is revised in flight; completed work is kept. |
 | "stop the backup" / "continue the backup" | Pauses and resumes the plan, also across restarts. |
 | "show me the plan", "plan history", "what did you change in the plan?" | Preview, history and revisions. |
 | "set autonomy to low / normal / high" | How much JARVIS does on its own initiative (never what's permitted). |
+
+Honesty guard: if the model says it did something ("I've deleted…", "…has been cancelled") but no tool that changes
+anything succeeded in that turn, the reply carries "Nothing was actually changed: I didn't run any action for that."
+The model's context includes the open plans and the most recent finished plan's findings, so questions about them are
+answered from the record. A file that disappears before approval is dropped from the question (and skipped if it
+vanishes after approval); pausing a plan withdraws its approval question, which is asked again on resume.
 
 ## Event-driven autonomy and proactive help
 

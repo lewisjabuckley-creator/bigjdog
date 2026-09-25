@@ -108,6 +108,40 @@ def compose_report(plan: Plan) -> str:
     return "\n".join(line for line in lines if line) or "Nothing to report."
 
 
+def details(plan: Plan) -> str:
+    """Everything the plan found, in full ("what are these files?"): the observations and each candidate with its
+    evidence, not just the one-line summary a notification carries."""
+    if plan.goal.kind == "research":
+        return _research_report(plan)
+    analysis = _analysis(plan)
+    if not analysis:
+        lines = _step_lines(plan)
+        return "\n".join([f"{plan.title} ({_STATUS_WORDS[plan.status]}):"] + lines) if lines else \
+            f"{plan.title} hasn't found anything yet ({_STATUS_WORDS[plan.status]})."
+    lines = [f"{plan.title} ({_STATUS_WORDS[plan.status]}): {_end(analysis.get('cause') or 'here is what I found')}"]
+    observed = [f.get("text", "") for f in analysis.get("findings", []) if f.get("confidence") == "observed"]
+    if observed:
+        lines.append("Observed: " + "; ".join(observed[:6]) + ".")
+    candidates = [c for c in analysis.get("candidates", []) if isinstance(c, dict)]
+    usable = [c for c in candidates if not c.get("blocked")]
+    if usable:
+        lines.append("Candidates:" if plan.goal.kind != "disk_cleanup" else "The files:")
+        for i, c in enumerate(usable[:10], 1):
+            lines.append(f"{i}. {_cap(c.get('reason') or c.get('title', ''))}")
+    for c in [c for c in candidates if c.get("blocked")][:3]:
+        lines.append(f"Not suggesting {c.get('title')}: {c['blocked']}.")
+    done = [n for n in plan.nodes if n.kind == NodeKind.ACTION and n.status == N.DONE]
+    if done:
+        lines += [_action_line(n) for n in done]
+    elif plan.terminal:
+        lines.append("Nothing was changed.")
+    return "\n".join(lines)
+
+
+def candidates(plan: Plan) -> list[dict[str, Any]]:
+    return [c for c in _analysis(plan).get("candidates", []) if isinstance(c, dict) and not c.get("blocked")]
+
+
 def _action_line(node, *, with_reason: bool = True) -> str:
     title = node.title[:1].lower() + node.title[1:]
     if node.status == N.DONE:

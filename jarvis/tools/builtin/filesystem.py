@@ -220,6 +220,9 @@ class FileDeleteTool(Tool):
         category="filesystem",
     )
 
+    def preview(self, args: dict[str, Any]) -> str:
+        return f"move {args.get('path')} to JARVIS's trash"
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         path = _resolve(args["path"], ctx)
         if not path.exists():

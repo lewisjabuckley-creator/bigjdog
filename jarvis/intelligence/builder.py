@@ -113,7 +113,10 @@ class PlanBuilder:
             blueprint, source = await self._model_blueprint(goal, ctx)
         if blueprint.problems:
             return BuildResult(None, blueprint.problems, blueprint.notes)
-        plan = Plan(goal, blueprint.title or goal.objective, blueprint.nodes, source=source, priority=goal.priority,
+        title = blueprint.title or goal.objective
+        if goal.mode == ExecutionMode.DRY_RUN and not title.lower().startswith("dry run"):
+            title = "Dry run: " + title[:1].lower() + title[1:]      # a preview must never read like the real thing
+        plan = Plan(goal, title, blueprint.nodes, source=source, priority=goal.priority,
                     mode=goal.mode, created_by=created_by, owner=owner, origin=origin, session_id=session_id,
                     project_id=getattr(project, "id", None), cwd=ctx.project_root or cwd, interactive=interactive,
                     autonomy=autonomy, assumptions=blueprint.assumptions, milestones=blueprint.milestones)

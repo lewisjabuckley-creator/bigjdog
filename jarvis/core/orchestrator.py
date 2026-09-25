@@ -104,6 +104,7 @@ class Orchestrator:
         self.client_cwd: str | None = None      # the interface's working folder (the runtime may run elsewhere)
         self._current_text = ""
         self._advisory = False                  # "what should I do?": recommend, never act
+        self._model_asked = False               # the last reply was the model asking the user something
         self._register_internal_tools()
         self.plans = PlanDialogue(self)
         self.handlers: dict[IntentKind, Handler] = {
@@ -127,6 +128,7 @@ class Orchestrator:
             IntentKind.ADVISE: self.plans.advise, IntentKind.SIMULATE: self.plans.simulate,
             IntentKind.PREDICT: self.plans.predict, IntentKind.PLAN_SHOW: self.plans.show,
             IntentKind.PLAN_HISTORY: self.plans.history, IntentKind.AUTONOMY: self.plans.autonomy,
+            IntentKind.PLAN_DETAILS: self.plans.details,
         }
 
     # -- entry point ------------------------------------------------------------------------
@@ -149,6 +151,7 @@ class Orchestrator:
 
     async def _handle(self, text: str) -> Response:
         svc = self.svc
+        self.plans.begin_turn()
         svc.notifications.on_user_input()
         svc.bus.emit(Event(EventType.USER_MESSAGE, "conversation", {"chars": len(text)}))
         self._record("user", text)
@@ -185,6 +188,7 @@ class Orchestrator:
             self.plans.focus_is_plan = False
         self.focus.last_user_text = text
         self.focus.last_reply = response.text
+        self._model_asked = bool(response.model) and response.text.rstrip().endswith("?")
         if response.intent not in (IntentKind.PROVENANCE,):
             self.focus.last_provenance = response.provenance
         svc.state.set("session.last_seen", svc.clock.now())
@@ -549,12 +553,29 @@ class Orchestrator:
             if task is None and res.ambiguous and not is_pronoun(intent.target):
                 return self._ask(self._task_choice_question(verb, res.candidates), intent, res.candidates, "task")
             if task is None:
-                if is_pronoun(intent.target):
-                    return self._reply("Nothing is running.", intent)
-                if not svc.tasks.find(intent.target or ""):
-                    return await self._or_chat(intent, self._reply(
-                        f"I couldn't find a running task matching '{intent.target}'.", intent))
-                return self._reply(f"I couldn't find a running task matching '{intent.target}'.", intent)
+                finished = self._finished_work(intent.target)
+                if finished:
+                    return self._reply(finished, intent)
+                nothing = self._reply(self._nothing_to_stop(intent, verb), intent)
+                words = set(re.findall(r"[a-z]+", (intent.target or "").lower()))
+                if is_pronoun(intent.target) or words & _WORK_WORDS or \
+                        (self._open_work() and not _names_a_program(intent.target or "")):
+                    # about JARVIS's own work: answer from the record, never from the model (it can't cancel
+                    # plans or tasks, must not claim it did, and must not mistake it for something to delete)
+                    return nothing
+                # a program ("stop firefox"): the model can look it up and stop it, asking first
+                return await self._or_chat(intent, nothing)
+        plan_id = task.outputs.get("plan_id")
+        if plan_id and svc.intelligence is not None and (plan := svc.intelligence.get(plan_id)) is not None \
+                and not plan.terminal:
+            # a step of a plan: stopping it means stopping the plan (never one step behind the plan's back)
+            engine = svc.intelligence.engine
+            ok, message = await (engine.cancel(plan.id, by=svc.user, reason="cancelled by you") if hard else
+                                 engine.pause(plan.id, by=svc.user, reason="stopped by you"))
+            text = (f"Cancelled {_lower(plan.title)}. Completed steps are kept in the history." if hard else
+                    f"Stopped {_lower(plan.title)}. It's checkpointed; say 'continue' to resume.")
+            return self._reply(text if ok else personality.sentence(message), intent, kind="action",
+                               data={"plan_id": plan.id})
         if hard:
             result = svc.tasks.cancel_task(task.id, by=svc.user, reason="cancelled by you")
         else:
@@ -569,6 +590,40 @@ class Orchestrator:
         if others:
             text += f" Still running: {personality.join_clauses([_lower(t.title) for t in others[:3]])}."
         return self._reply(text, intent, kind="action", task_id=task.id)
+
+    def _finished_work(self, target: str | None) -> str:
+        """'cancel the free up disk space process' when that plan already ended: say so instead of guessing."""
+        intel = self.svc.intelligence
+        if intel is None or not target or is_pronoun(target):
+            return ""
+        found = self.plans.find_plans(target)
+        plan = found[0] if found else None
+        if plan is None or not plan.terminal:
+            return ""
+        ago = personality.duration(self.svc.clock.now() - (plan.finished_at or plan.updated_at))
+        state = "finished" if plan.status.value == "completed" else plan.status.value
+        return f"{plan.title} already {state} ({ago} ago), so there's nothing to stop."
+
+    def _open_work(self) -> list[str]:
+        """Titles of the open plans and the open tasks outside plans (what "stop"/"cancel" could mean)."""
+        svc = self.svc
+        names = [p.title for p in svc.intelligence.open_plans()] if svc.intelligence is not None else []
+        return names + [t.title for t in svc.tasks.open_tasks()
+                        if not t.outputs.get("plan_id") and t.kind != TaskKind.MONITOR]
+
+    def _nothing_to_stop(self, intent: Intent, verb: str) -> str:
+        """No match for a stop/cancel/pause: say so plainly (nothing was changed) and list what could be stopped."""
+        verb = "pause" if intent.kind == IntentKind.PAUSE else verb
+        done = {"cancel": "cancelled", "stop": "stopped", "pause": "paused"}[verb]
+        names = self._open_work()
+        if not names:
+            return f"Nothing is running, so there's nothing to {verb}."
+        if intent.target and not is_pronoun(intent.target):
+            head = f"I couldn't find anything matching '{intent.target}', so I haven't {done} anything."
+        else:
+            head = f"I'm not sure which one you mean, so I haven't {done} anything."
+        listed = "; ".join(f"'{n}'" for n in names[:6])
+        return f"{head} Open right now: {listed}. Tell me which one, for example '{verb} {_lower(names[0])}'."
 
     async def _resume(self, intent: Intent) -> Response:
         svc = self.svc
@@ -649,7 +704,10 @@ class Orchestrator:
             return planned
         pending = svc.approvals.pending()
         if not pending:
-            return self._reply("There's nothing waiting for approval.", intent)
+            nothing = self._reply("There's nothing waiting for approval.", intent)
+            if self._model_asked:
+                return await self._or_chat(intent, nothing)    # "yes" to something the model asked
+            return nothing
         chosen_id = intent.params.get("resolved_id")
         if chosen_id is None and len(pending) > 1 and "all" not in intent.text.lower():
             focused = [a for a in pending if self.focus.tasks and a.task_id == self.focus.tasks[0]]
@@ -1366,6 +1424,7 @@ class Orchestrator:
         model_name = None
         notes: list[str] = []
         streamed_any = False
+        acted = False             # did any tool that changes something actually succeed this turn?
         for _round in range(_MAX_TOOL_ROUNDS):
             try:
                 response, note, streamed = await self._model_round(profile, messages, tool_schemas or None,
@@ -1379,14 +1438,23 @@ class Orchestrator:
             calls = response.tool_calls
             if not calls:
                 answer = personality.clean(strip_thinking(response.content)) or "Done."
+                footnote = f"Note: {'; '.join(notes)}" if notes else ""
+                if not acted and _CLAIM.search(answer):
+                    # the model said it did something, but nothing that changes anything ran: say so
+                    footnote = (footnote + "\n" if footnote else "") + \
+                        "Nothing was actually changed: I didn't run any action for that."
                 return Response(answer, intent.kind, provenance=provs, model=model_name, streamed=streamed_any,
-                                footnote=f"Note: {'; '.join(notes)}" if notes else "")
+                                footnote=footnote)
             messages.append(ChatMessage("assistant", response.content, tool_calls=calls))
             for call in calls:
                 outcome = await self._execute_model_tool(call, ctx, text)
                 if isinstance(outcome, Response):
                     return outcome
                 result, prov = outcome
+                tool = svc.registry.get(call.name)
+                if tool is not None and tool.spec.level > 0 and result.get("ok") and \
+                        result.get("status") != ExecStatus.DRY_RUN.value:
+                    acted = True
                 if prov is not None:
                     provs.append(prov)
                 messages.append(ChatMessage("tool", json.dumps(result, default=str)[:6000], name=call.name,
@@ -1438,9 +1506,10 @@ class Orchestrator:
 
     async def _or_chat(self, intent: Intent, deterministic: Response) -> Response:
         """The grammar matched but its target means nothing to the task system ("how's the weather?"):
-        let the model handle it when one is available."""
+        let the model handle it when one is available. A fallback conversation never starts a plan: the
+        grammar already decided this wasn't a new goal."""
         if self.svc.router.available():
-            reply = await self._chat(Intent(IntentKind.CHAT, intent.text, dry_run=intent.dry_run, source="model"))
+            reply = await self._chat(Intent(IntentKind.CHAT, intent.text, dry_run=intent.dry_run, source="fallback"))
             if reply.kind != "error":
                 return reply
         return deterministic       # no model (or it just failed): the deterministic answer still stands
@@ -1497,6 +1566,34 @@ class Orchestrator:
         prov = execution.result.provenance if execution.result and execution.result.provenance else \
             Provenance(ProvenanceKind.TOOL_OUTPUT, call.name)
         return execution.for_model(), prov
+
+
+# words that say a stop/cancel is about JARVIS's own work, not a program on the computer
+_WORK_WORDS = {"task", "tasks", "plan", "plans", "job", "jobs", "delete", "deletes", "deletion", "deletions",
+               "deleting", "cleanup", "clean", "backup", "backups", "research", "scan", "investigation", "work",
+               "free", "disk", "space"}
+
+
+def _names_a_program(target: str) -> bool:
+    """Whether a phrase names a program running now ("firefox", "the chrome process")."""
+    words = [w for w in re.findall(r"[a-z0-9]+", target.lower()) if w not in ("the", "my", "process", "app",
+                                                                            "program", "window")]
+    if not words:
+        return False
+    try:
+        import psutil
+        names = {os.path.splitext((p.info.get("name") or "").lower())[0] for p in psutil.process_iter(["name"])}
+    except Exception:
+        return False
+    return any(n and (n == words[0] or n.startswith(words[0])) for n in names)
+
+
+# first-person claims of having changed something ("I've deleted…", "all delete processes have been cancelled")
+_DONE_VERBS = (r"(?:cancel+ed|stopped|paused|deleted|removed|moved|killed|terminated|closed|installed|uninstalled|"
+               r"freed|cleaned|cleared|restarted|disabled|enabled|renamed|trashed|emptied)")
+_CLAIM = re.compile(rf"\b(?:i(?:'ve| have)?\s+(?:now\s+|just\s+|successfully\s+)?{_DONE_VERBS}|"
+                    rf"(?:has|have)\s+(?:now\s+)?been\s+(?:successfully\s+)?{_DONE_VERBS}|"
+                    rf"(?:is|are)\s+now\s+{_DONE_VERBS})\b", re.I)
 
 
 def _memory_kind(content: str, has_project: bool) -> MemoryKind:

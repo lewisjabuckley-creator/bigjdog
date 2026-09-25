@@ -103,7 +103,13 @@ class Simulator:
         if isinstance(cpu, (int, float)):
             parts.append(f"CPU would go from about {cpu:.0f}% to about {max(0.0, cpu - cpu_share):.0f}%")
         if isinstance(mem, (int, float)):
-            parts.append(f"memory from about {mem:.0f}% to about {max(0.0, mem - mem_share):.0f}%")
+            if len(procs) > 1:
+                # each process's figure counts memory they share, so the sum overstates what closing them frees
+                parts.append(f"memory could drop from about {mem:.0f}% to as low as about "
+                             f"{max(0.0, mem - mem_share):.0f}% (the processes share some memory, so the real drop "
+                             f"is usually smaller)")
+            else:
+                parts.append(f"memory from about {mem:.0f}% to about {max(0.0, mem - mem_share):.0f}%")
         parts.append("anything unsaved in it would be lost")
         return Estimate("; ".join(parts), "its CPU and memory use measured just now", "simulation",
                         data={"processes": len(procs), "cpu_share": round(cpu_share, 1), "memory_share": round(mem_share, 1)})

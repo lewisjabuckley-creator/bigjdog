@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import jarvis
 from jarvis import __version__
 from jarvis.config import JarvisConfig
 from jarvis.log import get_logger
@@ -32,6 +33,11 @@ log = get_logger("daemon")
 
 INFO_FILE = "runtime.json"
 TOKEN_FILE = "api.token"
+
+
+def source_root() -> str:
+    """The folder containing this ``jarvis`` package (a source checkout or site-packages)."""
+    return str(Path(jarvis.__file__).resolve().parent.parent)
 
 
 def info_path(data_dir: Path) -> Path:
@@ -101,7 +107,7 @@ class Daemon:
         info = {"pid": os.getpid(), "host": rcfg.api_host, "port": port, "version": __version__,
                 "run": self.runtime.run_id, "started_at": time.time(), "data_dir": str(self.data_dir),
                 "token_file": str(token_path(self.data_dir)), "simulated": self.runtime.simulated,
-                "python": sys.executable}
+                "python": sys.executable, "source": source_root()}
         _write_private(info_path(self.data_dir), json.dumps(info, indent=1))
         self._install_signals()
         log.info("daemon_ready", port=port, pid=os.getpid(), recovered=len(report.recovered))
@@ -109,10 +115,16 @@ class Daemon:
               f"{report.greeting()}", flush=True)
         if ready is not None:
             ready.set()
+        watchdog = asyncio.create_task(self._watch_for_stalls(), name="stall-watchdog")
         try:
             await self._stop.wait()
         finally:
             log.info("daemon_stopping")
+            watchdog.cancel()
+            try:
+                await watchdog
+            except (asyncio.CancelledError, Exception):
+                pass
             await self.server.stop()
             await self.runtime.stop()
             for path in (info_path(self.data_dir), token_path(self.data_dir)):
@@ -124,6 +136,34 @@ class Daemon:
                     pass
             print("JARVIS runtime stopped.", flush=True)
         return 0
+
+    async def _watch_for_stalls(self, *, beat_s: float = 5.0, dump_after_s: float = 120.0) -> None:
+        """If the event loop ever stops turning (the runtime hangs and stops answering), write every thread's
+        stack to logs/stall-traces.log so the cause can be found afterwards. A timer is re-armed on every beat;
+        it only fires when the loop has been blocked for ``dump_after_s``. Shorter hiccups are logged too."""
+        import faulthandler
+        path = Path(self.data_dir) / "logs" / "stall-traces.log"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(path, "a", encoding="utf-8")
+        except OSError:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                faulthandler.dump_traceback_later(dump_after_s, repeat=False, file=fh, exit=False)
+                before = loop.time()
+                await asyncio.sleep(beat_s)
+                lag = loop.time() - before - beat_s
+                if lag > min(2.0, dump_after_s / 2):
+                    log.warning("event_loop_lag", seconds=round(lag, 1))
+                    fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} JARVIS {__version__} pid {os.getpid()}: the "
+                             f"event loop was blocked for {lag:.1f}s"
+                             f"{' (thread stacks above)' if lag >= dump_after_s else ''}\n")
+                    fh.flush()
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+            fh.close()
 
     def _install_signals(self) -> None:
         loop = asyncio.get_running_loop()

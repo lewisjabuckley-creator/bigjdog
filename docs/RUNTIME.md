@@ -232,6 +232,8 @@ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 | Symptom | What to do |
 |---|---|
 | "another JARVIS runtime is already running" | One is running for this data directory, maybe an `--embedded` session. `jarvis runtime status`. |
+| "The JARVIS runtime (process N) is running but not answering" | It hung. `py -m jarvis` offers to restart it (tasks are recovered); or run `py -m jarvis runtime restart`. Since 0.3.0 the runtime writes the stacks of all its threads to `logs/stall-traces.log` in the data directory (`C:\Users\<you>\.jarvis\logs` on Windows) whenever it is blocked for two minutes; that file shows where it hung. |
+| "the JARVIS runtime running now is version X…" | You started a new copy of JARVIS (a new version, or another folder) while the old runtime kept running. `py -m jarvis` offers to restart it on the new code; other commands print a note. `runtime.json` records each runtime's version and source folder. |
 | The interface says it lost contact | The runtime stopped or restarted. Send a message: the CLI reconnects, starting the runtime if needed, and resends the same request id, so nothing is done twice. |
 | `jarvis runtime start` says it exited during startup | The message includes the end of `logs/runtime.out`; the full log is there. |
 | Windows: a console window flashes up every few seconds | Fixed after 0.2.0: an older runtime ran without any console, so each GPU check (`nvidia-smi`) opened a window. Update, then run `py -m jarvis runtime restart` so the old runtime is replaced. |

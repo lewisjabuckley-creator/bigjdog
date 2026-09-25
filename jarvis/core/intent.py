@@ -63,6 +63,7 @@ class IntentKind(StrEnum):
     SIMULATE = "simulate"                # "what would happen if...?"
     PREDICT = "predict"                  # "how long will the tests take?"
     PLAN_SHOW = "plan_show"
+    PLAN_DETAILS = "plan_details"        # "what are these files?", "what did you find?"
     PLAN_HISTORY = "plan_history"
     AUTONOMY = "autonomy"
     CHAT = "chat"
@@ -81,7 +82,7 @@ class Intent:
 
 _PREFIX = re.compile(r"^(hey |ok |okay )?(jarvis[,:!]?\s+)?(please\s+|could you\s+|can you\s+|would you\s+)?",
                      re.IGNORECASE)
-_SUFFIX = re.compile(r"[\s,]*(please|thanks|thank you|jarvis)?[\s.!?]*$", re.IGNORECASE)
+_SUFFIX = re.compile(r"(?:[\s,]*(?:please|thanks|thank you|jarvis|for me))*[\s.!?]*$", re.IGNORECASE)
 _REF = r"(?P<target>.+?)"
 
 Extractor = Callable[[re.Match[str]], dict[str, Any]]
@@ -104,6 +105,7 @@ rule(r"(stop|halt|abort|cancel|kill|forget it|never ?mind|nevermind)", IntentKin
 rule(r"(stop|halt|abort|cancel|kill) (that|it|this|everything|all( tasks)?|the (?P<target>.+)|(?P<target2>.+))",
      IntentKind.STOP, lambda m: {"target": m.group("target") or m.group("target2") or m.group(2)})
 rule(r"(pause|hold on|wait|hold)( (that|it|this|the (?P<target>.+)))?", IntentKind.PAUSE, _t)
+rule(r"(pause|hold) (?P<target>.+)", IntentKind.PAUSE, _t)
 rule(r"(continue|resume|carry on|keep going|go on|keep working( on (it|this|that))?|pick up where we left off)"
      r"( (with )?(that|it|this|the (?P<target>.+)))?", IntentKind.RESUME, _t)
 rule(r"continue (the )?(?P<target>.+?)( project)?", IntentKind.RESUME, _t)
@@ -227,6 +229,12 @@ rule(r"(so,? )?(what should i do|what do you (recommend|suggest|advise)|what wou
 rule(r"(simulate:? .+|what (would|will) happen if .+|what if (i|you|we) .+)", IntentKind.SIMULATE)
 rule(r"(how long (will|would|does|should) .+|when will .+ (finish|be done)|predict .+|estimate how long .+)",
      IntentKind.PREDICT)
+rule(r"(what|which) (are|were) (these|those|the|they)( files| ones| things| items)?|(what|which) files"
+     r"( are (they|those|these)| were (they|those|these))?|show me( the)? (details|files|list|results?|them|those)|"
+     r"(more )?details|tell me more|what did you find( out)?|list (them|the files|those)|what (are|were) they",
+     IntentKind.PLAN_DETAILS)
+rule(r"((list|show)( me)?( all)?( the| my)? (tasks|processes|jobs)|all( the)? (tasks|processes|jobs)|"
+     r"(what|which) (tasks|processes|jobs) are (running|open|there))", IntentKind.STATUS)
 rule(r"(show( me)?|what'?s|what is|tell me)( the| your)? plan( for (?P<target>.+?))?|what'?s the plan|"
      r"show( me)? the plan", IntentKind.PLAN_SHOW, _t)
 rule(r"(plan history|(what|which) plans (have you|did you) (run|do)|show( me)? (my |the |recent )?plans|list plans|"
@@ -272,6 +280,8 @@ def parse(text: str) -> Intent:
     if raw.startswith("$ ") or raw.startswith("`"):
         cmd = raw.lstrip("$ ").strip("`").strip()
         return Intent(IntentKind.SHELL, raw, params={"command": cmd}, dry_run=dry_run)
+    if is_affirmative(body):
+        return Intent(IntentKind.APPROVE, raw, dry_run=dry_run)
     for pattern, kind, extractor in RULES:
         match = pattern.match(body)
         if match:
@@ -283,7 +293,22 @@ def parse(text: str) -> Intent:
     return Intent(IntentKind.CHAT, raw, dry_run=dry_run, source="model")
 
 
-PRONOUNS = {"it", "that", "this", "them", "those", "the task", "the job", "the thing"}
+PRONOUNS = {"it", "that", "this", "them", "those", "the task", "the job", "the thing", "that one", "this one",
+            "that task", "this task", "that process", "this process", "the process", "that plan", "this plan",
+            "the plan", "that job", "this job"}
+
+# words that only say yes ("sure, proceed", "yes please go ahead", "ok do it"), with at least one of _YES
+_YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "approve", "approved", "confirm", "confirmed",
+        "alright", "absolutely", "definitely", "affirmative"}
+_YES_FILLER = _YES | {"please", "go", "ahead", "do", "it", "for", "that's", "thats", "sounds", "good", "fine", "then",
+                      "carry", "on", "right", "thing", "course", "of", "and", "you", "can", "just"}
+
+
+def is_affirmative(body: str) -> bool:
+    words = re.findall(r"[a-z']+", body.lower())
+    joined = " ".join(words)
+    return bool(words) and len(words) <= 8 and all(w in _YES_FILLER for w in words) and (
+        any(w in _YES for w in words) or "go ahead" in joined or re.search(r"\bdo it\b", joined) is not None)
 
 
 def is_pronoun(target: str | None) -> bool:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -16,13 +17,25 @@ from typing import Any, Iterator
 
 import httpx
 
-import jarvis
 from jarvis.platforms import current as current_platform
-from jarvis.service.daemon import info_path, token_path
+from jarvis.service.daemon import info_path, source_root, token_path
+
+__all__ = ["ApiFailure", "Client", "RuntimeInfo", "RuntimeNotRunning", "RuntimeUnresponsive", "connect", "launch",
+           "read_info", "source_root"]
 
 
 class RuntimeNotRunning(RuntimeError):
     pass
+
+
+class RuntimeUnresponsive(RuntimeNotRunning):
+    """A JARVIS runtime process exists for this data directory but doesn't answer. Starting another one can't
+    help (it holds the data directory); it has to be restarted."""
+
+    def __init__(self, pid: int, detail: str = "") -> None:
+        super().__init__(f"the JARVIS runtime (process {pid}) is running but not answering{detail}. Restart it with: "
+                         "py -m jarvis runtime restart")
+        self.pid = pid
 
 
 class ApiFailure(RuntimeError):
@@ -43,6 +56,7 @@ class RuntimeInfo:
     run: str | None = None
     started_at: float = 0.0
     simulated: bool = False
+    source: str = ""            # the folder its code was loaded from (empty for runtimes older than 0.3)
 
     @property
     def base_url(self) -> str:
@@ -61,7 +75,28 @@ def read_info(data_dir: Path) -> RuntimeInfo | None:
         return None
     return RuntimeInfo(int(info["pid"]), info.get("host", "127.0.0.1"), int(info["port"]), token, str(data_dir),
                        info.get("version", ""), info.get("run"), float(info.get("started_at") or 0),
-                       bool(info.get("simulated")))
+                       bool(info.get("simulated")), str(info.get("source") or ""))
+
+
+def is_jarvis_process(pid: int) -> bool:
+    """Whether a pid is a JARVIS runtime (a stale record's pid may since belong to something else)."""
+    try:
+        import psutil
+        cmdline = " ".join(psutil.Process(pid).cmdline())
+    except Exception:
+        return False
+    return "jarvis" in cmdline and "runtime" in cmdline
+
+
+def mismatch(info: RuntimeInfo) -> str:
+    """Why the running runtime isn't this copy of JARVIS (another version, or code from another folder), or ''."""
+    from jarvis import __version__
+    if info.version and info.version != __version__:
+        where = f" from {info.source}" if info.source else ""
+        return f"the JARVIS runtime running now is version {info.version}{where}, but this is version {__version__}"
+    if info.source and os.path.normcase(info.source) != os.path.normcase(source_root()):
+        return f"the JARVIS runtime running now was started from {info.source}, not from this folder ({source_root()})"
+    return ""
 
 
 class Client:
@@ -93,6 +128,16 @@ class Client:
             return bool(self.http.get("/v1/ping", timeout=3.0).json().get("ok"))
         except (httpx.HTTPError, ValueError):
             return False
+
+    def ping_patiently(self, attempts: int = 3, timeout: float = 5.0) -> bool:
+        """A busy runtime can miss one quick ping; a hung one misses them all."""
+        for _ in range(attempts):
+            try:
+                if self.http.get("/v1/ping", timeout=timeout).json().get("ok"):
+                    return True
+            except (httpx.HTTPError, ValueError):
+                time.sleep(0.5)
+        return False
 
     def get(self, path: str, **params: Any) -> dict[str, Any]:
         return self._check(self.http.get(path, params={k: v for k, v in params.items() if v is not None}))
@@ -135,11 +180,6 @@ def daemon_argv(*, config: str | None, data_dir: str, simulate: bool) -> list[st
     return argv + ["runtime", "run"]
 
 
-def source_root() -> str:
-    """The folder containing this ``jarvis`` package (a source checkout or site-packages)."""
-    return str(Path(jarvis.__file__).resolve().parent.parent)
-
-
 def daemon_env() -> dict[str, str]:
     """The runtime must import this same JARVIS even when it isn't installed (run from a source folder)."""
     env = dict(os.environ)
@@ -177,6 +217,10 @@ def launch(*, config: str | None, data_dir: Path, simulate: bool = False, timeou
                     tail = fh.read().decode(errors="replace").strip()[-800:]
             except OSError:
                 pass
+            held = re.search(r"already running for this data directory \(process (\d+)\)", tail)
+            if held and is_jarvis_process(int(held.group(1))):
+                # another runtime holds the data directory but didn't answer: starting more can't help
+                raise RuntimeUnresponsive(int(held.group(1)))
             raise RuntimeNotRunning(f"the JARVIS runtime exited during startup. {tail}".strip())
         time.sleep(0.2)
     raise RuntimeNotRunning(f"the JARVIS runtime did not become ready within {timeout:.0f}s; see {log_path}")
@@ -187,9 +231,11 @@ def connect(*, data_dir: Path, config: str | None = None, simulate: bool = False
     info = read_info(data_dir)
     if info is not None:
         client = Client(info)
-        if client.ping():
+        if client.ping() or client.ping_patiently():
             return client
         client.close()
+        if is_jarvis_process(info.pid):
+            raise RuntimeUnresponsive(info.pid)
     if not auto_start:
         raise RuntimeNotRunning("the JARVIS runtime is not running (start it with: jarvis runtime start)")
     if announce:

@@ -56,7 +56,7 @@ class ContextAssembler:
                 if k.split(".", 1)[1] in ("cpu_percent", "memory_percent", "disk_percent", "gpu_percent",
                                           "battery_percent", "memory_used_gb", "memory_total_gb")))
         lines.append(f"Network: {svc.state.value('network.state', 'unknown')}; health: {svc.health.overall().label}")
-        tasks = svc.tasks.open_tasks()
+        tasks = [t for t in svc.tasks.open_tasks() if not t.outputs.get("plan_id")]   # plan steps: see PLANS
         if tasks:
             lines.append("Open tasks:")
             for t in tasks[:8]:
@@ -64,8 +64,8 @@ class ContextAssembler:
                 lines.append(f"- [{t.id}] {t.title}: {kind}"
                              + (f", {int(t.compute_progress() * 100)}%" if t.status in EXECUTING and t.plan else "")
                              + (f" ({t.status_reason})" if t.status_reason else ""))
-        recent = svc.tasks.list_tasks([TaskStatus.COMPLETED, TaskStatus.FAILED], order="recent", limit=3,
-                                      since=now - 6 * 3600)
+        recent = [t for t in svc.tasks.list_tasks([TaskStatus.COMPLETED, TaskStatus.FAILED], order="recent", limit=8,
+                                                  since=now - 6 * 3600) if not t.outputs.get("plan_id")][:3]
         if recent:
             lines.append("Recently finished: " + "; ".join(
                 f"{t.title} ({t.status.value}: {str(t.outputs.get('summary', ''))[:120]})" for t in recent))
@@ -73,6 +73,27 @@ class ContextAssembler:
         if approvals:
             lines.append("Awaiting user approval: " + "; ".join(a.summary for a in approvals[:3]))
         return "\n".join(lines)
+
+    def plans_block(self) -> str:
+        """JARVIS's own plans, from the plan record: what is open, and what the most recent one found. The model
+        answers questions about them from this, instead of guessing."""
+        intel = self.svc.intelligence
+        if intel is None:
+            return ""
+        from jarvis.intelligence import explain
+        now = self.svc.clock.now()
+        lines = [f"- [{p.id}] {explain.status_line(p)}" for p in intel.open_plans()[:4]]
+        finished = next((p for p in intel.recent(6) if p.terminal and now - (p.finished_at or p.updated_at) <= 7200),
+                        None)
+        if finished is not None:
+            detail = explain.details(finished)
+            detail = detail if len(detail) <= 1800 else detail[:1800] + "…"
+            lines.append(f"Most recent finished plan [{finished.id}] ({finished.status.value}"
+                         f"{', dry run' if finished.mode.value == 'dry_run' else ''}):\n{detail}")
+        if not lines:
+            return ""
+        return ("PLANS (JARVIS's own work, from the plan record; answer questions about it from this, and say so "
+                "if something isn't here):\n" + "\n".join(lines))
 
     async def build(self, user_text: str, history: list[ChatMessage]) -> AssembledContext:
         svc = self.svc
@@ -82,6 +103,10 @@ class ContextAssembler:
                                            capabilities=CAPABILITIES)
         provs = [Provenance(ProvenanceKind.SYSTEM_STATE, "live state")]
         blocks = [system, "COMPUTER: " + environment_note(), "LIVE STATE (observed just now):\n" + self.live_state()]
+        plans = self.plans_block()
+        if plans:
+            blocks.append(plans)
+            provs.append(Provenance(ProvenanceKind.DATABASE, "plan record"))
         project = svc.projects.active()
         memory_ids: list[str] = []
         if svc.config.memory.enabled:

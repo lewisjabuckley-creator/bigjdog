@@ -131,7 +131,7 @@ you › Analyze this project.
 jarvis › Analyzing bigjdog in the background (task task-1c30…). It keeps running if you close this window; I'll
          tell you when the analysis is ready.
 (window closed … reopened)
-JARVIS 0.2.0 — connected to the runtime (pid 3792). Talking through llama3.1:8b (local, tools enabled).
+JARVIS 0.3.0 — connected to the runtime (pid 3792). Talking through llama3.1:8b (local, tools enabled).
 While you were away: Analyze bigjdog completed.
 you › What happened while I was away?
 jarvis › While you were away (15:10–15:41, 31 minutes):
