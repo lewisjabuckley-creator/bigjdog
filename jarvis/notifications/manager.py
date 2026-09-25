@@ -62,6 +62,7 @@ class NotificationManager:
         self.user_activity = "idle"     # idle | typing | speaking | away
         self._recent_interrupts: list[float] = []
         self._by_key: dict[str, Notification] = {}
+        self._by_text: dict[tuple[str, str], Notification] = {}    # identical news arriving together
         self._queue: dict[str, Notification] = {}
         # True while no interface is attached (set by the runtime's presence tracking): nothing can be shown,
         # so news is queued for the user's return instead of being "delivered" to nobody
@@ -137,6 +138,7 @@ class NotificationManager:
         if dedupe_key and dedupe_key in self._by_key:
             prev = self._by_key[dedupe_key]
             if now - prev.ts < self.config.dedupe_window_s and prev.state != "acknowledged":
+                before = prev.priority
                 prev.count += 1
                 prev.ts = now
                 prev.body = body
@@ -146,10 +148,25 @@ class NotificationManager:
                 # repeated problems escalate one level, but never to CRITICAL by repetition alone
                 if prev.count >= 3 and prev.priority < NP.URGENT:
                     prev.priority = NotificationPriority(prev.priority + 1)
+                if prev.state == "delivered" and prev.priority <= before:
+                    self._persist(prev)          # already shown: counted, not announced again
+                    return prev
                 self._route(prev)
                 return prev
+        same = self._by_text.get((title, body))
+        if same is not None and now - same.first_ts < 30.0 and same.state != "acknowledged":
+            # the very same news about another item (three copies of one plan): one line, counted
+            same.count += 1
+            same.title = f"{title} ({same.count} of them)"
+            if dedupe_key:
+                self._by_key[dedupe_key] = same
+            self._persist(same)
+            return same
         n = Notification(new_id("ntf"), NotificationPriority(priority), title, body, source, task_id, dedupe_key,
                          1, "new", now, now, now + expires_in if expires_in else None)
+        self._by_text[(title, body)] = n
+        if len(self._by_text) > 200:
+            self._by_text = {k: v for k, v in self._by_text.items() if now - v.first_ts < 30.0}
         if dedupe_key:
             self._by_key[dedupe_key] = n
         self._route(n)
@@ -344,6 +361,9 @@ class NotificationManager:
         if t == EventType.PLAN_PAUSED and str(p.get("by", "")).startswith("system:recovery"):
             return NP.IMPORTANT, f"{_cap(p.get('title', 'the plan'))} was interrupted", p.get("reason", ""), \
                 f"plan-interrupted:{p.get('plan_id')}"
+        if t == EventType.PLAN_PAUSED and str(p.get("by", "")).startswith("system:approvals"):
+            return NP.IMPORTANT, f"{_cap(p.get('title', 'the plan'))} is on hold", p.get("reason", ""), \
+                f"plan-held:{p.get('plan_id')}"
         if t == EventType.TASK_COMPLETED:
             if p.get("task_kind") == "monitor":
                 return None     # monitors report through MONITOR_TRIGGERED

@@ -292,6 +292,13 @@ haven't repeated it") until you say "continue". Completed nodes are never re-run
 | "show me the plan", "plan history", "what did you change in the plan?" | Preview, history and revisions. |
 | "set autonomy to low / normal / high" | How much JARVIS does on its own initiative (never what's permitted). |
 
+Unanswered questions: approval questions expire after an hour (`approval_timeout_s`). A plan whose question expired
+is put on hold once ("on hold (my question went unanswered): say 'continue free up disk space' to be asked again");
+asking for the same thing again sets the stalled plan aside and starts afresh with new measurements. "Cancel all
+processes", "stop everything" and "cancel all of them" mean all of JARVIS's open work. Declining a change JARVIS
+proposed outside a plan ends that task as declined, never "completed". In Downloads, only files lying directly in
+the folder are suggested for removal: a file inside an unpacked folder belongs to that folder.
+
 Honesty guard: if the model says it did something ("I've deleted…", "…has been cancelled") but no tool that changes
 anything succeeded in that turn, the reply carries "Nothing was actually changed: I didn't run any action for that."
 The model's context includes the open plans and the most recent finished plan's findings, so questions about them are
@@ -336,7 +343,7 @@ mode and backs off from kinds you keep ignoring.
 | `max_identical_failures` | 2 | The same failure again stops retrying. |
 | `retry_backoff_s` | 2.0 | First retry delay (doubles). |
 | `max_model_calls` | 30 | Model calls per plan (planning and repair). |
-| `max_plan_hours` | 12 | A plan still open after this waits for you. |
+| `max_plan_hours` | 12 | A plan that has been working on its own this long (since you last approved or resumed it) stops and waits for you, once, until you say continue or cancel. Time spent waiting for you doesn't count. |
 | `resource_wait_max_s` | 1800 | How long a step waits for resources before asking. |
 | `max_concurrent_inference` | 2 | Model requests at once; the rest queue by priority. |
 | `agents_max_concurrent` | 2 | Agents at once. |

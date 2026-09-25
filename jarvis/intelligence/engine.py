@@ -265,6 +265,7 @@ class PlanEngine:
                         node.reset(f"resumed by {by}")
                     node.meta.pop("waiting_since", None)
                 plan.paused_by = None
+                plan.facts.pop("_limit", None)          # the user has decided: a safety hold is lifted
                 self._set(plan, P.RUNNING, reason or f"resumed by {by}", by=by)
             elif plan.status == P.READY:
                 pass
@@ -344,11 +345,19 @@ class PlanEngine:
             if plan.status == P.PAUSED:
                 self.store.save(plan)
                 return plan
-            limit = self.guard.age(plan, self.clock.now())
-            if limit and plan.status != P.BLOCKED:
-                self._limit(plan, limit)
+            if plan.status == P.BLOCKED and plan.facts.get("_limit"):
+                # held by a safety limit: it stays exactly as it is (and says so once) until the user decides
                 self.store.save(plan)
                 return plan
+            if self._expired_question(plan):
+                self.store.save(plan)
+                return plan
+            if self._working_alone(plan):
+                limit = self.guard.age(plan, self.clock.now(), since=self._last_user_action(plan))
+                if limit:
+                    self._limit(plan, limit)
+                    self.store.save(plan)
+                    return plan
             await self._recover_failures(plan)
             await self._progress(plan)
             await self._update_status(plan)
@@ -1210,7 +1219,49 @@ class PlanEngine:
                                                         "quality": node.quality.value if node.quality else None,
                                                         "summary": node.summary[:200]})
 
+    def _working_alone(self, plan: Plan) -> bool:
+        """Something is running or about to (the age limit is about runaway work). A plan that is only waiting,
+        for the user or for anything else, isn't going round in circles."""
+        return any(n.status == N.RUNNING for n in plan.nodes) or bool(plan.ready_nodes())
+
+    def _last_user_action(self, plan: Plan) -> float | None:
+        """When the user last took part: an approval, a resume, a correction."""
+        times = [h.get("ts") or 0.0 for h in plan.history if not str(h.get("by", "system")).startswith("system")]
+        times += [a.get("ts") or 0.0 for a in plan.approvals]
+        times += [c.get("ts") or 0.0 for c in plan.corrections]
+        return max(times) if times else None
+
+    def _expired_question(self, plan: Plan) -> bool:
+        """An approval question that went unanswered until it expired leaves its step waiting with nothing to
+        answer. Put the plan on hold, once, saying how to be asked again (resuming asks afresh)."""
+        if plan.status not in (P.WAITING, P.RUNNING, P.BLOCKED):
+            return False
+        self.approvals.expire()
+        for node in plan.nodes:
+            if node.status != N.WAITING or not node.task_id:
+                continue
+            task = self.tasks.get_task(node.task_id)
+            if task is None:
+                continue
+            asked = self._approvals_for(node.task_id)
+            expired = task.status == TaskStatus.WAITING and bool(asked) and all(a.status == "expired" for a in asked)
+            # (older versions put a plan on hold by pausing its steps and flipping between blocked and waiting)
+            legacy = task.status == TaskStatus.PAUSED and (task.control or {}).get("issued_by") == "system:planner"
+            if not (expired or legacy):
+                continue
+            if expired:
+                self.tasks.pause_task(node.task_id, by="system:planner", source=InstructionSource.DEFAULT,
+                                      reason="its approval question expired")
+            self.approvals.cancel_for_task(node.task_id)
+            plan.paused_by = "system:approvals"
+            what = "my question went unanswered" if expired else "it had been waiting a long time"
+            self._set(plan, P.PAUSED, f"on hold ({what}): say 'continue {plan.title.lower()}' to be asked again",
+                      by="system:approvals", force=True)
+            return True
+        return False
+
     def _limit(self, plan: Plan, limit: Limit) -> None:
+        plan.facts["_limit"] = limit.name
         self._limit_event(plan, limit)
         for node in plan.active_nodes():
             if node.task_id:

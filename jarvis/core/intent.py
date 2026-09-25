@@ -304,6 +304,15 @@ _YES_FILLER = _YES | {"please", "go", "ahead", "do", "it", "for", "that's", "tha
                       "carry", "on", "right", "thing", "course", "of", "and", "you", "can", "just"}
 
 
+_EVERYTHING = re.compile(r"^(everything|all|all of (them|it)|(all|every)( of)?( the| my)? (tasks?|process(es)?|jobs?|"
+                         r"plans?|work|things?)( (running|open|going))?|everything (running|open|going on))$")
+
+
+def is_everything(target: str | None) -> bool:
+    """"all", "everything", "all processes", "all of them", "every task": all of JARVIS's open work."""
+    return bool(target) and bool(_EVERYTHING.match(" ".join(re.findall(r"[a-z]+", target.lower()))))
+
+
 def is_affirmative(body: str) -> bool:
     words = re.findall(r"[a-z']+", body.lower())
     joined = " ".join(words)

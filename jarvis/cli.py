@@ -442,7 +442,12 @@ class _NotificationStream(threading.Thread):
         self.session = session
         self.prompt = prompt
         self.stopped = threading.Event()
+        self.at_prompt = threading.Event()     # the main thread is waiting for input (the prompt is showing)
         self.lost = False
+
+    def _show(self, text: str) -> None:
+        # only put the prompt back if it was showing; while JARVIS is answering it would appear twice
+        print(f"\r{text}\n" + (self.prompt if self.at_prompt.is_set() else ""), end="", flush=True)
 
     def run(self) -> None:
         failures = 0
@@ -455,15 +460,14 @@ class _NotificationStream(threading.Thread):
                         self.lost = False
                     if item.get("type") == "notification" and not self.stopped.is_set():
                         prio = NotificationPriority[item["priority"].upper()]
-                        print(f"\r{_color('● ' + item['text'], prio)}\n{self.prompt}", end="", flush=True)
+                        self._show(_color('● ' + item['text'], prio))
                     if self.stopped.is_set():
                         return
             except Exception:
                 failures += 1
                 if failures == 3 and not self.stopped.is_set():
                     self.lost = True
-                    print(f"\r● Lost contact with the JARVIS runtime; I'll reconnect when you send a message.\n"
-                          f"{self.prompt}", end="", flush=True)
+                    self._show("● Lost contact with the JARVIS runtime; I'll reconnect when you send a message.")
             if self.stopped.wait(min(2.0 * failures, 10.0) if failures else 0.5):
                 return
 
@@ -496,7 +500,7 @@ def _returning_lines(att: dict[str, Any], skip: set[str] | None = None) -> list[
             lines.append(f"● {text}")
     waiting = [t for t in ret.get("waiting") or [] if t["id"] not in skip]     # recovery notes are shown above
     if waiting:
-        lines.append("Waiting on you: " + "; ".join(f"{_clip(t['title'], 60)} ({_clip(t['reason'] or t['status'], 70)})"
+        lines.append("Waiting on you: " + "; ".join(f"{_clip(t['title'], 60)} ({_clip(t['reason'] or t['status'], 110)})"
                                                    for t in waiting[:3]) + ".")
     if lines:
         lines.append("Ask \"what happened while I was away?\" for the details.")
@@ -573,11 +577,14 @@ def interactive_client(args: argparse.Namespace) -> int:
     stream.start()
     try:
         while True:
+            stream.at_prompt.set()
             try:
                 line = input(prompt)
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
+            finally:
+                stream.at_prompt.clear()
             line = _clean_input(line)
             if not line:
                 continue

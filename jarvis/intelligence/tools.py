@@ -105,6 +105,7 @@ class DiskUsageTool(Tool):
             "top": {"type": "integer", "default": 10, "minimum": 1},
             "largest_files": {"type": "integer", "default": 0, "minimum": 0},
             "older_than_days": {"type": "number", "default": 30, "minimum": 0},
+            "top_level_files": {"type": "boolean", "default": False},
             "budget_s": {"type": "number", "default": 10, "minimum": 0.1},
         }, "required": ["path"]},
         level=PermissionLevel.OBSERVE, idempotent=True, verification="read-only", path_params=("path",),
@@ -119,12 +120,15 @@ class DiskUsageTool(Tool):
         if not root.exists():
             return ToolResult(False, f"{root} does not exist", error="not_found")
         data = await asyncio.to_thread(_disk_usage, root, args["top"], args["largest_files"],
-                                       args["older_than_days"], args["budget_s"])
+                                       args["older_than_days"], args["budget_s"], args["top_level_files"])
         summary = f"{root}: {data['percent']:.0f}% of the drive used, {size_text(data['free'])} free"
         return ToolResult(True, summary, data, provenance=Provenance(ProvenanceKind.LOCAL_FILE, str(root)))
 
 
-def _disk_usage(root: Path, top: int, largest: int, older_than_days: float, budget_s: float) -> dict[str, Any]:
+def _disk_usage(root: Path, top: int, largest: int, older_than_days: float, budget_s: float,
+                top_level_files: bool = False) -> dict[str, Any]:
+    """``top_level_files``: only files directly in ``root`` are listed as large old files. A file deep inside a
+    folder (an unpacked program or mod) is part of that folder: removing it alone would break the rest."""
     started = time.monotonic()
     total, used, free = shutil.disk_usage(root)
     children: list[dict[str, Any]] = []
@@ -152,7 +156,7 @@ def _disk_usage(root: Path, top: int, largest: int, older_than_days: float, budg
                         except OSError:
                             continue
                         size += st.st_size
-                        if largest and st.st_mtime < cutoff:
+                        if largest and not top_level_files and st.st_mtime < cutoff:
                             files.append({"path": p, "size": st.st_size,
                                           "age_days": round((time.time() - st.st_mtime) / 86400)})
                     if time.monotonic() - started > budget_s:

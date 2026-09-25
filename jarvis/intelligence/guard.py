@@ -64,10 +64,13 @@ class LoopGuard:
             return Limit("circular_dependency", "its steps depend on each other in a circle (" + " → ".join(cycle) + ")")
         return None
 
-    def age(self, plan: Plan, now: float) -> Limit | None:
-        started = plan.started_at or plan.created_at
+    def age(self, plan: Plan, now: float, *, since: float | None = None) -> Limit | None:
+        """A plan working on its own for too long. ``since`` is the last time the user was involved (an approval,
+        a resume): time spent waiting for the user is not the plan going round in circles."""
+        started = max(plan.started_at or plan.created_at or 0.0, since or 0.0)
         if started and now - started > self.config.max_plan_hours * 3600:
-            return Limit("duration", f"the plan has been open for more than {self.config.max_plan_hours:g} hours")
+            return Limit("duration", f"it has been working on its own for more than {self.config.max_plan_hours:g} "
+                                     "hours")
         return None
 
     def resource_wait(self, node: PlanNode, now: float) -> Limit | None:

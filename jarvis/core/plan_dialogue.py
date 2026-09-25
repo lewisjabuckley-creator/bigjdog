@@ -14,7 +14,7 @@ import asyncio
 import re
 from typing import TYPE_CHECKING, Any
 
-from jarvis.core.intent import Intent, IntentKind, is_pronoun
+from jarvis.core.intent import Intent, IntentKind, is_everything, is_pronoun
 from jarvis.core.types import Provenance, ProvenanceKind
 from jarvis.intelligence import explain
 from jarvis.intelligence.goals import ExecutionMode, Goal
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from jarvis.core.orchestrator import Orchestrator, Response
 
 P = PlanStatus
+N = NodeStatus
 _FIX_IT = re.compile(r"^(ok(ay)?,?\s+|yes,?\s+|then\s+|right,?\s+)?(please\s+)?(go ahead and\s+)?(fix|sort|solve|deal with)"
                      r"\s+(it|that|this|them)(\s+then)?(\s+please)?[.!]?$", re.I)
 _INLINE_WAIT_S = 10.0
@@ -54,6 +55,7 @@ class PlanDialogue:
         self.focus_is_plan = False              # the conversation is currently about a plan
         self.reported_inline: list[str] = []    # plans whose result this reply shows (acknowledged afterwards)
         self.turn = 0
+        self.stopped_plans: list[str] = []      # titles "stop everything" just stopped (reported by the caller)
         self.offered_fix: tuple[str, int] | None = None   # (plan id, turn) when a reply offered to fix what it found
 
     def begin_turn(self) -> None:
@@ -158,8 +160,15 @@ class PlanDialogue:
                                                                   "class": amb.klass.value}))
             return self._reply(amb.question, intent, kind="question")
         same = self._same_open_plan(goal)
-        if same is not None:
+        replaced = 0
+        if same is not None and self._live(same):
             return self._already_on_it(same, intent)
+        while same is not None:
+            # the same goal, but stalled (on hold, blocked, or asking nothing): start afresh with new evidence
+            await self.intel.engine.cancel(same.id, by=self.svc.user, reason="replaced by a newer request for the "
+                                                                              "same thing")
+            replaced += 1
+            same = self._same_open_plan(goal)
         started = await self.intel.run(goal, cwd=self.o._work_root(), session_id=self.o.session_id,
                                        origin=f"conversation:{self.o.session_id}")
         if started.plan is None or started.problems:
@@ -168,6 +177,9 @@ class PlanDialogue:
         plan = started.plan
         self.focus_plan = plan.id
         prefix = _sentence(amb.assumption) + " " if amb is not None and amb.assumption else ""
+        if replaced:
+            prefix = (f"(I've set aside {'an older, stalled attempt' if replaced == 1 else f'{replaced} older, stalled attempts'}"
+                      " at this and started afresh.) ") + prefix
         if started.preview:
             return self._reply(prefix + explain.preview(plan) + "\nShall I start?", intent, kind="question",
                                data={"plan_id": plan.id, "format": "block"})
@@ -186,6 +198,18 @@ class PlanDialogue:
                                                                    norm(goal.text)):
                 return plan
         return None
+
+    def _live(self, plan: Plan) -> bool:
+        """Actually getting on with it: working, about to, or waiting on a question the user can answer now."""
+        if plan.status in (P.RUNNING, P.READY, P.REPLANNING, P.VERIFYING, P.CREATED, P.VALIDATING):
+            return True
+        if plan.status == P.WAITING:
+            if self._pending_gate(plan) is not None:
+                return True
+            return any(n.status == N.WAITING and "waiting for resources" in (n.note or "") for n in plan.nodes)
+        if plan.status == P.PAUSED and not str(plan.paused_by or "").startswith("system"):
+            return True                  # the user paused it: point at it ("say 'continue'") rather than replace it
+        return False                     # blocked, or put on hold by JARVIS: stalled
 
     def _already_on_it(self, plan: Plan, intent: Intent) -> "Response":
         self.focus_plan = plan.id
@@ -400,12 +424,15 @@ class PlanDialogue:
         target = (intent.target or "").lower()
         if self.intel is None:
             return None
-        if target in ("everything", "all", "all tasks"):
+        if is_everything(intent.target):
+            self.stopped_plans = []
             for plan in self.intel.open_plans():
                 if hard:
-                    await self.intel.engine.cancel(plan.id, by=self.svc.user, reason="cancelled by you")
+                    ok, _ = await self.intel.engine.cancel(plan.id, by=self.svc.user, reason="cancelled by you")
                 else:
-                    await self.intel.engine.pause(plan.id, by=self.svc.user, reason="stopped by you")
+                    ok, _ = await self.intel.engine.pause(plan.id, by=self.svc.user, reason="stopped by you")
+                if ok:
+                    self.stopped_plans.append(plan.title)
             return None            # the task-level handler reports the totals
         if (intent.target is None or is_pronoun(intent.target)) and not self.focus_is_plan and any(
                 t.status.value in ("running", "planning", "verifying", "queued") and not t.outputs.get("plan_id")
@@ -445,7 +472,7 @@ class PlanDialogue:
             (done if result.ok else problems).append(_lower(task.title) if result.ok else result.message)
         if not done:
             return self._reply(_sentence(problems[0] if problems else "Nothing was changed"), intent)
-        text = f"{verb} {_join(done)}."
+        text = f"{verb} {_join(_grouped(done))}."
         text += " Completed steps are kept in the history." if hard else " It's checkpointed; say 'continue' to resume."
         if problems:
             text += " " + _sentence(f"Couldn't stop: {'; '.join(problems)}")
@@ -537,6 +564,14 @@ class PlanDialogue:
 
 def _lower(title: str) -> str:
     return title[:1].lower() + title[1:] if title[:2] != title[:2].upper() else title
+
+
+def _grouped(titles: list[str]) -> list[str]:
+    """["free up disk space"] * 3 -> ["free up disk space (3 copies)"]: the same thing named once."""
+    counts: dict[str, int] = {}
+    for t in titles:
+        counts[t] = counts.get(t, 0) + 1
+    return [f"{t} ({n} copies)" if n > 1 else t for t, n in counts.items()]
 
 
 def _join(items: list[str]) -> str:

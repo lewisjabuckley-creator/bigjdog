@@ -148,9 +148,13 @@ def disk_cleanup(goal: Goal, ctx: PlanningContext, prefix: str = "") -> Blueprin
     target = resolve_folder(goal.target, ctx)
     steps = [step("disk_usage", {"path": target, "top": 10}, f"measure what uses space in {target}", "usage")]
     extra: list[dict[str, Any]] = []
-    for folder, days, label in ((_downloads(ctx.home), 30, "downloads"), (tempfile.gettempdir(), 7, "temp")):
+    # Downloads: only files lying directly in it (a file inside an unpacked folder belongs to that folder);
+    # temp: anything old, however deep
+    for folder, days, label, top_level in ((_downloads(ctx.home), 30, "downloads", True),
+                                           (tempfile.gettempdir(), 7, "temp", False)):
         if os.path.isdir(folder):
-            steps.append(step("disk_usage", {"path": folder, "top": 5, "largest_files": 8, "older_than_days": days},
+            steps.append(step("disk_usage", {"path": folder, "top": 5, "largest_files": 8, "older_than_days": days,
+                                             "top_level_files": top_level},
                               f"find large, old files in {folder}", label))
             extra.append({"$fact": f"{p}measure.{label}"})
     measure = PlanNode(f"{p}measure", "Measure disk use", NodeKind.GATHER, steps=steps, estimate={"seconds": 10})

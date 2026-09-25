@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable
 
 from jarvis.core import personality, reports
 from jarvis.core.context import ContextAssembler, summarize_state_for_tool
-from jarvis.core.intent import Intent, IntentKind, is_pronoun, parse
+from jarvis.core.intent import Intent, IntentKind, is_everything, is_pronoun, parse
 from jarvis.core.modes import Mode
 from jarvis.core.plan_dialogue import PlanDialogue
 from jarvis.core.references import ConversationFocus, ReferenceResolver
@@ -532,16 +532,21 @@ class Orchestrator:
         if stopped is not None:
             return stopped
         verb = "cancel" if hard else "stop"
-        target = (intent.target or "").lower()
-        if target in ("everything", "all", "all tasks"):
-            tasks = [t for t in svc.tasks.open_tasks()]
-            if not tasks:
-                return self._reply("Nothing is running.", intent)
+        if is_everything(intent.target):
+            plans, self.plans.stopped_plans = list(self.plans.stopped_plans), []
+            tasks = [t for t in svc.tasks.open_tasks() if not t.outputs.get("plan_id")]
+            if not tasks and not plans:
+                return self._reply(f"Nothing is running, so there's nothing to {verb}.", intent)
             for t in tasks:
-                (svc.tasks.cancel_task if hard else svc.tasks.pause_task)(t.id, by=svc.user, reason=f"{verb}ped by you")
+                (svc.tasks.cancel_task if hard else svc.tasks.pause_task)(
+                    t.id, by=svc.user, reason="cancelled by you" if hard else "stopped by you")
             done = "Cancelled" if hard else "Stopped"
-            return self._reply(f"{done} {len(tasks)} task{'s' if len(tasks) != 1 else ''}."
-                               + ("" if hard else " Everything is checkpointed; say 'continue' to resume."), intent)
+            parts = [_lower(p) for p in plans[:3]] + ([f"{len(plans) - 3} more plans"] if len(plans) > 3 else [])
+            if tasks:
+                parts.append(f"{len(tasks)} task{'s' if len(tasks) != 1 else ''}")
+            return self._reply(f"{done} {personality.join_clauses(parts)}."
+                               + ("" if hard else " Everything is checkpointed; say 'continue' to resume."), intent,
+                               kind="action")
         task = self._resolved_task(intent)
         if task is None:
             res = self.resolver.task(None if is_pronoun(intent.target) else intent.target,
@@ -600,9 +605,10 @@ class Orchestrator:
         plan = found[0] if found else None
         if plan is None or not plan.terminal:
             return ""
-        ago = personality.duration(self.svc.clock.now() - (plan.finished_at or plan.updated_at))
+        elapsed = self.svc.clock.now() - (plan.finished_at or plan.updated_at)
+        ago = "just now" if elapsed < 10 else f"{personality.duration(elapsed)} ago"
         state = "finished" if plan.status.value == "completed" else plan.status.value
-        return f"{plan.title} already {state} ({ago} ago), so there's nothing to stop."
+        return f"{plan.title} was already {state} {ago}, so there's nothing to stop."
 
     def _open_work(self) -> list[str]:
         """Titles of the open plans and the open tasks outside plans (what "stop"/"cancel" could mean)."""
@@ -759,7 +765,13 @@ class Orchestrator:
                         step.note = "declined by you"
                 svc.tasks.save(task)
                 remaining = [s for s in task.pending_steps()]
-                svc.tasks.resume_task(task.id, by=svc.user, reason="continuing without the declined step")
+                if not remaining and not task.outputs.get("plan_id") and \
+                        not any(s.status == StepStatus.DONE for s in task.plan):
+                    # nothing was done and nothing is left: it ends as declined, never as "completed"
+                    # (a plan's approval step is different: the plan records the decline itself)
+                    svc.tasks.cancel_task(task.id, by=svc.user, reason="you declined it")
+                else:
+                    svc.tasks.resume_task(task.id, by=svc.user, reason="continuing without the declined step")
                 if remaining:
                     text += " The rest of the task continues."
         return self._reply(text, intent, kind="action", task_id=approval.task_id)
@@ -1529,7 +1541,7 @@ class Orchestrator:
         if long_running and not ctx.dry_run:
             # durable + interruptible: run it as a task and wait briefly
             what = (tool.preview(call.arguments) if tool else call.name).split(" (in ")[0]
-            task = self._user_task(f"{call.name} for: {user_text[:80]}", title=what[:60],
+            task = self._user_task(f"{call.name} for: {user_text[:80]}", title=_short_title(what),
                                    steps=[Step(tool.preview(call.arguments) if tool else call.name, call.name,
                                                call.arguments)], policy=TaskPolicy(on_step_failure="fail"),
                                    cwd=ctx.cwd)
@@ -1553,7 +1565,7 @@ class Orchestrator:
             return result, Provenance(ProvenanceKind.TOOL_OUTPUT, call.name)
         execution = await svc.registry.execute(call.name, call.arguments, ctx, reason=reason)
         if execution.status == ExecStatus.NEEDS_APPROVAL:
-            task = self._user_task(f"{call.name} for: {user_text[:80]}", title=execution.preview[:60],
+            task = self._user_task(f"{call.name} for: {user_text[:80]}", title=_short_title(execution.preview),
                                    steps=[Step(execution.preview, call.name, execution.args)],
                                    policy=TaskPolicy(on_step_failure="fail"), cwd=ctx.cwd)
             try:
@@ -1572,6 +1584,16 @@ class Orchestrator:
 _WORK_WORDS = {"task", "tasks", "plan", "plans", "job", "jobs", "delete", "deletes", "deletion", "deletions",
                "deleting", "cleanup", "clean", "backup", "backups", "research", "scan", "investigation", "work",
                "free", "disk", "space"}
+
+
+_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/)(?:[^\s'\"]*[\\/])+([^\s'\"\\/]+)")
+
+
+def _short_title(preview: str, limit: int = 60) -> str:
+    """A task title from an action preview: file paths shortened to their names ("move vc_redist.x64.exe to
+    JARVIS's trash"), so the title still says what it does when it's cut to length."""
+    text = _PATH.sub(lambda m: m.group(1), preview)
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def _names_a_program(target: str) -> bool:
