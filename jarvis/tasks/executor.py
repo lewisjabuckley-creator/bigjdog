@@ -68,7 +68,7 @@ class TaskExecutor:
     def _actor(self, task: Task) -> Actor:
         delegated = task.created_by if task.created_by.startswith(("automation:", "agent:")) else None
         return Actor("task", task.id, task.owner, interactive=bool(task.authority.get("interactive", False)),
-                     delegated_by=delegated)
+                     delegated_by=delegated, external=bool(task.authority.get("external", False)))
 
     def _ctx(self, task: Task, controller: TaskController, step: Step | None = None) -> ToolContext:
         return ToolContext(actor=self._actor(task), task_id=task.id, cwd=task.cwd, dry_run=task.dry_run,

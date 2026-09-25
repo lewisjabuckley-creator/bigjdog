@@ -34,7 +34,7 @@ conversation = ["llama3.1:8b", "qwen2.5:7b", "llama3.2:3b"]
 reasoning = ["qwen2.5:32b", "qwen2.5:14b", "llama3.1:8b"]
 planning = ["qwen2.5:14b", "llama3.1:8b"]
 coding = ["qwen2.5-coder:14b", "qwen2.5-coder:7b"]
-vision = ["llama3.2-vision", "llava:13b"]
+vision = ["llama3.2-vision", "llava:13b", "llava", "moondream"]
 summarization = ["llama3.2:3b"]
 classification = ["llama3.2:3b"]
 background = ["llama3.2:3b"]
@@ -113,3 +113,20 @@ self_memory_warn_mb = 1500      # warn when JARVIS itself uses this much memory
 enabled = false                 # prepare a morning briefing on a schedule
 time = "07:30"
 days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+# -- images, screenshots, documents and the screen (docs/PHASE4.md) -------------------------------------
+[perception]
+enabled = true
+ocr = "auto"                    # auto | tesseract | vision | off (Tesseract is found on PATH or in Program Files)
+tesseract_path = ""
+allow_cloud_vision = false      # also needs [privacy] allow_cloud = true; never for private inputs or screen captures
+max_input_mb = 40
+max_image_side = 1568           # images are shrunk to this before a vision model sees them (needs Pillow)
+max_concurrent_vision = 1       # vision is heavy: one analysis at a time
+retention_days = 7              # stored copies of what you shared; what was learned from them is kept
+screen_retention_days = 1
+remember_findings = true        # important findings become memories (never the images themselves)
+screen_mode = "off"             # off | on_request | watching; you switch it in conversation ("watch my screen")
+screen_interval_s = 30          # watching: how often the active window is checked
+screen_capture_every = 4        # watching: a full capture + OCR at most every Nth check, or when something changes
+document_max_chars = 12000      # document text handed to a model in one request

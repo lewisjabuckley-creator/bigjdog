@@ -8,19 +8,29 @@ as one component among many. You give it intent; it plans, executes through perm
 the result against reality, remembers what matters, keeps watching, and can always explain what it is doing
 and why.
 
-> **Status: v0.3, intelligence and autonomy.** The deterministic core, task engine, permission system, memory,
-> monitoring and conversational layer are implemented and tested. JARVIS talks through a real Ollama model; since
-> Phase 2 it runs as a background runtime that interfaces connect to; and since Phase 3 it turns complex requests
-> into plans it carries out step by step — investigating, deciding, asking before changing anything, verifying
-> the result independently, adapting when something fails, and explaining why from the record. The suite has 373
-> offline tests (including the twenty "final test" scenarios from the specification, the ten Phase 3
-> scenarios and process-level tests of the background runtime) plus 24 opt-in live tests against a real Ollama
-> server. The runtime was verified on a Windows PC by its owner for Phase 2; Phase 3 is tested on Linux. Voice,
-> vision, a graphical HUD, communications and physical device integrations are **not implemented yet**; see
-> [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: v0.4, multimodal perception.** The deterministic core, task engine, permission system, memory,
+> monitoring and conversational layer are implemented and tested. JARVIS talks through a real Ollama model. Since
+> Phase 2 it runs as a background runtime that interfaces connect to. Since Phase 3 it turns complex requests
+> into plans it carries out step by step: investigating, deciding, asking before changing anything, verifying the
+> result independently, adapting when something fails, and explaining why from the record. Since Phase 4 it
+> understands images, screenshots and documents you share, and, only if you switch it on, your screen. It can
+> turn an error it sees into a verified fix, while typing stays the main way to use it.
+>
+> The suite has 444 offline tests plus 27 opt-in live tests against a real Ollama server. The offline tests
+> include the twenty "final test" scenarios from the specification, the ten Phase 3 and ten Phase 4 scenarios,
+> and process-level tests of the background runtime. The runtime was verified on a Windows PC by its owner;
+> Phases 3 and 4 are tested on Linux. Voice, camera, a graphical HUD, communications and physical device
+> integrations are **not implemented yet**; see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What it does today
 
+- **Looks at what you show it.** Drag a screenshot into the window (or `/paste` one after Win+Shift+S) and
+  ask "what's wrong with this?". A local vision model looks at it, the text is read with measured confidence,
+  and the answer says what it's based on. "How do I fix this?", "what changed?" with two images, "the screenshot
+  from earlier" and "find the important requirements in spec.pdf" all work. Say "fix it" and a recognised problem
+  becomes a Phase 3 plan (asking first, verified afterwards). Screen awareness is off until you turn it on, and
+  you can always see and stop it. Text inside images and documents is treated as data and can never give JARVIS
+  instructions. Without a vision model it tells you so instead of guessing. See [docs/PHASE4.md](docs/PHASE4.md).
 - **Carries out goals, not just commands.** "My computer is slow — find out why and fix it" becomes a plan: it
   measures, works out the likely cause from the evidence, asks before changing anything ("I'd like to stop X
   (PID n) — it can't be undone. Proceed?"), makes the change, has it checked independently, and tells you whether
@@ -88,6 +98,10 @@ jarvis doctor --live              # verify the whole chain against your Ollama
 
 Step-by-step setup, model choice and troubleshooting: [docs/OLLAMA.md](docs/OLLAMA.md).
 
+**For images and screenshots** (optional): `ollama pull llama3.2-vision` (or the smaller `moondream`), plus
+`pip install -e ".[vision]"` to shrink large images and read PDFs better. Tesseract, if installed, reads text
+in images with measured confidence. `what can you see?` tells you what is available.
+
 **Without any model**, with simulated metrics, network and model (its own data directory and runtime):
 
 ```bash
@@ -131,7 +145,7 @@ you › Analyze this project.
 jarvis › Analyzing bigjdog in the background (task task-1c30…). It keeps running if you close this window; I'll
          tell you when the analysis is ready.
 (window closed … reopened)
-JARVIS 0.3.0 — connected to the runtime (pid 3792). Talking through llama3.1:8b (local, tools enabled).
+JARVIS 0.4.0 — connected to the runtime (pid 3792). Talking through llama3.1:8b (local, tools enabled).
 While you were away: Analyze bigjdog completed.
 you › What happened while I was away?
 jarvis › While you were away (15:10–15:41, 31 minutes):
@@ -141,7 +155,9 @@ jarvis › While you were away (15:10–15:41, 31 minutes):
              <the analysis the model wrote from the measured project facts>
 ```
 
-In the interactive session, `/tasks`, `/task <id>`, `/events`, `/approvals`, `/grants`, `/health`, `/status`,
+Share images and documents by dragging them into the window, `/attach <file>` or `/paste` (a clipboard image);
+`/inputs` lists what you've shared and `/screen on|watch|off` switches screen awareness. In the interactive
+session, `/tasks`, `/task <id>`, `/events`, `/approvals`, `/grants`, `/health`, `/status`,
 `/away`, `/state` and (in simulation) `/sim cpu 95`, `/sim model off` and `/sim network off` expose operational
 detail. Say `help` for the language JARVIS understands without a model.
 
@@ -166,6 +182,8 @@ everything local. An explicit current instruction from you always outranks a sta
 ```text
 jarvis/
   core/          intent engine, references, orchestrator, reports, context, modes, emergency, personality
+  intelligence/  goals, plans (DAG), playbooks, plan engine, verification, replanning, agent coordination
+  perception/    inputs and observations, vision, OCR, documents, screen awareness, references, safety
   tasks/         task model and state machine, manager, executor, worker pool, recovery, resources
   tools/         tool contract, registry (the single gate for effects), builtin and internal tools
   permissions/   levels, grants, approvals, path scope, instruction hierarchy
@@ -191,13 +209,14 @@ jarvis/
   cli.py         command-line interface (a client of the runtime)
 ```
 
-More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/RUNTIME.md](docs/RUNTIME.md) ·
+More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/PHASE4.md](docs/PHASE4.md) ·
+[docs/PHASE3.md](docs/PHASE3.md) · [docs/RUNTIME.md](docs/RUNTIME.md) ·
 [docs/DECISIONS.md](docs/DECISIONS.md) · [docs/ROADMAP.md](docs/ROADMAP.md) · [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 
 ## Tests
 
 ```bash
-python -m pytest            # about 30 seconds; no network, no model, no GPU required
+python -m pytest            # about two minutes; no network, no model, no GPU required
 ```
 
 `tests/test_runtime_lifecycle.py`, `tests/test_scheduler.py` and `tests/test_api.py` cover the persistent runtime
@@ -222,4 +241,5 @@ JARVIS_OLLAMA_TESTS=1 JARVIS_TEST_MODEL=llama3.1:8b python -m pytest tests/integ
 
 The plumbing tests build tiny deterministic "puppet" models on the fly, so they need no model download. See
 [docs/OLLAMA.md](docs/OLLAMA.md#for-developers-live-integration-tests). `tests/integration/test_live_runtime.py`
-runs the Phase 2 acceptance scenario against the real server through real processes.
+runs the Phase 2 acceptance scenario against the real server through real processes, and
+`tests/integration/test_live_vision.py` runs images through Ollama's real image encoder with "vision puppets".

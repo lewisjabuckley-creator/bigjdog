@@ -8,6 +8,7 @@ monitoring, running tasks, enforcing permissions, answering status questions and
 ```text
                       USER
                         │  (CLI today; voice / HUD clients later) — clients only, see "Process model"
+                        │  text, plus images, screenshots and documents (Phase 4)
                         ▼
                  Local API (loopback HTTP, token)  ── jarvis/service/
                         │
@@ -260,13 +261,36 @@ memory, autonomy levels, estimates and event-driven behaviour. `core/plan_dialog
                  └ ambiguous: one question       └ failures → strategies → Replanner (bounded) → report
 ```
 
+### Perception (`perception/`, Phase 4)
+Images, screenshots, documents and (only when the user turns it on) the screen become observations; see
+[PHASE4.md](PHASE4.md). `PerceptionStore` validates inputs, stores them by content hash with metadata,
+sensitivity and retention, and caches derived results. `VisionService` sends images only to vision models,
+chosen by the router, local unless explicitly allowed, one at a time. `OCRService` reads text with measured
+confidence (Tesseract) or, labelled as unmeasured, with a vision model. `documents` gives structure, targeted
+retrieval, requirements, references and diffs, PDFs included. `ScreenAwareness` captures only in the mode the
+user chose, turns what it sees into a `ScreenState` and raises change events once. `references` resolves "this",
+"the second one" and "the screenshot from earlier" from the record. `safety` frames external content as data
+and spots instruction-like text. `PerceptionService` ties these together. `core/perception_dialogue.py` is the
+conversation side, `perception/tools.py` exposes observe-level tools to plans and agents, and
+`intelligence/visual.py` turns a recognised problem into a Phase 3 goal.
+
+Content from images and documents taints the turn: after a model has read it, anything above observing needs
+the user's explicit approval (`Actor.external`), and tasks and plans created then carry that restriction.
+
+```text
+ input ─► PerceptionStore ─► Observation ─► OCR · vision (router, needs_vision) · document structure
+             │ validated, hashed, retained        │ cached by (hash, operation, parameters)
+             ▼                                    ▼
+    references ("this", "screenshot 2") ─► answer with provenance ─► memory (findings) ─► "fix it" ─► plan
+```
+
 ## Data (SQLite, `database/schema.py`)
 
 `events`, `state`, `entities`, `relations`, `tasks`, `approvals`, `grants`, `audit`, `memories` (+ `memories_fts`,
 `embeddings`), `decisions` (+ `decisions_fts`), `projects`, `notifications`, `automations`, `conversation`,
 `users`; since schema v2 also `runtime_runs`, `requests` (conversation turn idempotency), `briefings`, a unique
 `tasks.idempotency_key` and schedule state columns on `automations`; since schema v3 `goals`, `plans` and
-`plan_revisions`. WAL mode, one connection guarded by a
+`plan_revisions`; since schema v4 `observations`, `perception_cache` and `screen_states`. WAL mode, one connection guarded by a
 re-entrant lock, versioned migrations (an existing v1 database is upgraded in place).
 
 ## Extending JARVIS
@@ -296,12 +320,15 @@ audit.
 3. **Acceptance scenarios** (`tests/test_scenarios.py`): the full runtime with a simulated model, metrics and
    network, exercising the twenty scenarios in spec §200. Phase 3 adds `test_intelligence_units.py`,
    `test_planning.py` (the plan engine on a real runtime with real processes and files) and
-   `test_phase3_scenarios.py` (its ten definition-of-done scenarios through the conversation).
+   `test_phase3_scenarios.py` (its ten definition-of-done scenarios through the conversation). Phase 4 adds
+   `test_perception.py` and `test_phase4_scenarios.py`, with a scripted vision model, a fake OCR engine and a
+   simulated screen.
 4. **Live integration** (`tests/integration/`, opt-in with `JARVIS_OLLAMA_TESTS=1`): a real Ollama server.
    `test_live_runtime.py` covers the persistent runtime against it: health and model state, a task waiting
    through an Ollama outage, and the Phase 2 acceptance scenario through real processes.
    *Puppet* models (`tests/integration/puppet.py`) are tiny GGUF files with hand-set weights: one-hot
    embeddings, zeroed attention and feed-forward, and a lookup-table output layer. They make the real server emit
    scripted replies, such as a specific `<tool_call>`, so the assertions are exact while the server does real
-   template rendering, llama.cpp inference, tool-call parsing and streaming. `JARVIS_TEST_MODEL` adds
-   capability checks with a real instruction model.
+   template rendering, llama.cpp inference, tool-call parsing and streaming. *Vision puppets* add a tiny real
+   CLIP projector, so Ollama reports the vision capability and runs each image through its real image encoder
+   (`test_live_vision.py`). `JARVIS_TEST_MODEL` adds capability checks with a real instruction model.

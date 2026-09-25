@@ -253,6 +253,11 @@ class Runtime:
                        automations, devices, metrics, presence=presence, user=cfg.general.user,
                        simulated=self.simulated, extra={"agents": agents, "agent_runner": agent_runner})
         svc.intelligence = IntelligenceService(svc, agents=agents, runner=agent_runner)
+        if cfg.perception.enabled:
+            from jarvis.perception.service import PerceptionService
+            from jarvis.perception.tools import register_perception_tools
+            svc.perception = PerceptionService(svc)
+            register_perception_tools(registry, svc.perception)
         return svc
 
     def _default_providers(self) -> list[ModelProvider]:
@@ -346,6 +351,9 @@ class Runtime:
         self._periodic("maintenance", 6 * 3600.0, self._maintenance)
         if svc.intelligence is not None:
             self._periodic("planner", max(0.05, self.config.scheduler.tick_s), svc.intelligence.tick)
+        if svc.perception is not None:
+            # only does anything while the user has screen awareness set to "watching"
+            self._periodic("screen", self.config.perception.screen_interval_s, svc.perception.screen.tick)
         if use_monitoring:
             svc.monitoring = MonitoringService(
                 self.config.monitoring, system=system,
@@ -552,6 +560,8 @@ class Runtime:
         now = self.svc.clock.now()
         pruned = self.svc.events.prune(now)
         expired = self.svc.memory.purge_expired()
+        if self.svc.perception is not None:
+            self.svc.perception.maintenance()     # stored copies of images/documents past their retention
         # conversation request records only need to outlive a client's retries
         requests = self.svc.db.execute("DELETE FROM requests WHERE status='done' AND created_at < ?",
                                        (now - 7 * 86400,))

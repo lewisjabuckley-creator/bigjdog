@@ -164,9 +164,10 @@ class Client:
                     yield json.loads(line)
 
     def converse(self, text: str, *, request_id: str, session: str = "default", cwd: str | None = None,
-                 client_id: str | None = None) -> dict[str, Any]:
+                 client_id: str | None = None, attachments: list[str] | None = None) -> dict[str, Any]:
         return self.post("/v1/conversation", {"text": text, "request_id": request_id, "session": session,
-                                              "cwd": cwd, "client_id": client_id}, timeout=None)
+                                              "cwd": cwd, "client_id": client_id,
+                                              "attachments": [{"path": p} for p in attachments or []]}, timeout=None)
 
 
 def daemon_argv(*, config: str | None, data_dir: str, simulate: bool) -> list[str]:

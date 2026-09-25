@@ -36,7 +36,8 @@ class Conversations:
         self._inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
     async def handle(self, text: str, *, session: str = "default", request_id: str | None = None,
-                     cwd: str | None = None, on_token: Callable[[str], None] | None = None) -> tuple[str, dict[str, Any], bool]:
+                     cwd: str | None = None, on_token: Callable[[str], None] | None = None,
+                     attachments: list[Any] | None = None) -> tuple[str, dict[str, Any], bool]:
         """Returns (request id, response, replayed)."""
         svc = self.runtime.svc
         assert svc is not None
@@ -52,13 +53,13 @@ class Conversations:
                                "Ask \"what are you doing?\" to see any task it started."), True
         svc.db.execute("INSERT INTO requests(id, session_id, text, status, created_at) VALUES(?,?,?,?,?)",
                        (rid, session, "" if svc.memory.suppressed else text[:2000], "running", svc.clock.now()))
-        task = asyncio.create_task(self._run(rid, text, session, cwd, on_token), name=f"turn-{rid}")
+        task = asyncio.create_task(self._run(rid, text, session, cwd, on_token, attachments), name=f"turn-{rid}")
         self._inflight[rid] = task
         # shielded: the turn finishes even if the interface disconnects while waiting
         return rid, await asyncio.shield(task), False
 
     async def _run(self, rid: str, text: str, session: str, cwd: str | None,
-                   on_token: Callable[[str], None] | None) -> dict[str, Any]:
+                   on_token: Callable[[str], None] | None, attachments: list[Any] | None = None) -> dict[str, Any]:
         svc = self.runtime.svc
         assert svc is not None
         lock = self._locks.setdefault(session, asyncio.Lock())
@@ -75,7 +76,8 @@ class Conversations:
                         pass
 
                 try:
-                    response = (await orch.handle(text, on_token=sink if on_token else None, cwd=cwd)).to_dict()
+                    response = (await orch.handle(text, on_token=sink if on_token else None, cwd=cwd,
+                                                  attachments=attachments)).to_dict()
                 except Exception as exc:
                     log.error("turn_failed", request=rid, error=repr(exc))
                     response = _error(f"Something went wrong while handling that ({exc}). It's logged; nothing else "

@@ -23,10 +23,12 @@ from jarvis.core import personality, reports
 from jarvis.core.context import ContextAssembler, summarize_state_for_tool
 from jarvis.core.intent import Intent, IntentKind, is_everything, is_pronoun, parse
 from jarvis.core.modes import Mode
+from jarvis.core.perception_dialogue import PerceptionDialogue
 from jarvis.core.plan_dialogue import PlanDialogue
 from jarvis.core.references import ConversationFocus, ReferenceResolver
 from jarvis.core.services import Services
 from jarvis.core.types import OperationalReason, Priority, Provenance, ProvenanceKind, new_id
+from jarvis.perception.tools import EXTERNAL_CONTENT_TOOLS
 from jarvis.events.types import Event, EventType
 from jarvis.log import get_logger
 from jarvis.memory.store import MemoryKind
@@ -104,9 +106,11 @@ class Orchestrator:
         self.client_cwd: str | None = None      # the interface's working folder (the runtime may run elsewhere)
         self._current_text = ""
         self._advisory = False                  # "what should I do?": recommend, never act
+        self._attachments: list[Any] = []       # sent with the current message (Phase 4)
         self._model_asked = False               # the last reply was the model asking the user something
         self._register_internal_tools()
         self.plans = PlanDialogue(self)
+        self.perceive = PerceptionDialogue(self)
         self.handlers: dict[IntentKind, Handler] = {
             IntentKind.STATUS: self._status, IntentKind.REENTRY: self._reentry, IntentKind.BRIEFING: self._briefing,
             IntentKind.WHAT_CHANGED: self._what_changed, IntentKind.DIAGNOSE: self._diagnose, IntentKind.WHY: self._why,
@@ -133,10 +137,12 @@ class Orchestrator:
 
     # -- entry point ------------------------------------------------------------------------
     async def handle(self, text: str, *, on_token: Callable[[str], None] | None = None,
-                     cwd: str | None = None) -> Response:
+                     cwd: str | None = None, attachments: list[Any] | None = None) -> Response:
         """Handle one user turn. ``on_token`` receives model answer text as it streams (interfaces may show it
         live); deterministic answers are returned whole. ``cwd`` is the interface's working folder, which is
-        what "this project" and relative paths mean to the user."""
+        what "this project" and relative paths mean to the user. ``attachments`` are images, screenshots or
+        documents sent with the message (Phase 4); typed or dropped file paths in the text are found too."""
+        self._attachments = list(attachments or [])
         if cwd and os.path.isdir(cwd):
             self.client_cwd = cwd
         self._current_text = text
@@ -154,10 +160,17 @@ class Orchestrator:
         self.plans.begin_turn()
         svc.notifications.on_user_input()
         svc.bus.emit(Event(EventType.USER_MESSAGE, "conversation", {"chars": len(text)}))
-        self._record("user", text)
+        attachments, self._attachments = self._attachments, []
+        names = [getattr(a, "name", "") or os.path.basename(getattr(a, "path", "") or "") for a in attachments]
+        self._record("user", text + (f" [attached: {', '.join(n for n in names if n)}]" if attachments else ""))
         response: Response | None = None
-        if self.pending_question:
+        if self.pending_question and not attachments:
             response = await self._answer_pending(text)
+        elif attachments:
+            self.pending_question = None
+        if response is None:
+            # Phase 4: images, documents, the screen, "what can you see?" — otherwise nothing changes
+            response = await self.perceive.intake(text, attachments)
         if response is None:
             response = await self._dispatch(text)
         inline = list(self._inline_tasks)
@@ -253,6 +266,8 @@ class Orchestrator:
             return None
         if pq.get("entity") == "monitor_spec":
             return await self._monitor_from_answer(text, pq)
+        if pq.get("entity") == "visual_clarify":
+            return await self.perceive.answer_clarification(text, pq)
         if pq.get("entity") == "goal_clarify":
             if parse(text).kind not in (IntentKind.CHAT, IntentKind.OPEN_PROJECT):
                 return None        # a new request (or "cancel"), not an answer
@@ -331,7 +346,8 @@ class Orchestrator:
     def _user_task(self, objective: str, *, steps: list[Step] | None = None, title: str = "",
                    success: dict[str, Any] | None = None, cwd: str | None = None, dry_run: bool = False,
                    priority: Priority = Priority.P1, project: Project | None = None, template: str | None = None,
-                   dependencies: list[str] | None = None, policy: TaskPolicy | None = None) -> Task:
+                   dependencies: list[str] | None = None, policy: TaskPolicy | None = None,
+                   external: bool = False) -> Task:
         project = project or self.svc.projects.active()
         task = self.svc.tasks.create_task(objective, title=title, steps=steps, success_condition=success,
                                           cwd=cwd or (project.root if project and project.root else None),
@@ -339,7 +355,8 @@ class Orchestrator:
                                           owner=self.svc.user, project_id=project.id if project else None,
                                           outputs={"template": template} if template else None,
                                           dependencies=dependencies, policy=policy,
-                                          authority={"interactive": True}, request=self._current_text,
+                                          authority={"interactive": True, **({"external": True} if external else {})},
+                                          request=self._current_text,
                                           origin=f"conversation:{self.session_id}")
         self.focus.touch_task(task.id)
         return task
@@ -1384,6 +1401,11 @@ class Orchestrator:
             exclude.add("device_command")
         if profile.complexity != "high":
             exclude.add("delegate_to_agent")
+        if svc.perception is not None:
+            if svc.perception.screen.mode.value == "off":
+                exclude |= {"screen_look", "screen_check"}      # the screen is off limits until the user allows it
+            if not svc.perception.recent(self.session_id, limit=1):
+                exclude |= {"image_analyze", "image_read_text"}  # nothing has been shared to look at
         names = [t.spec.name for t in svc.registry.list() if t.spec.name not in exclude
                  and t.spec.category != "planning"]
         if self._advisory:
@@ -1418,7 +1440,7 @@ class Orchestrator:
                 f"The language model is unavailable{why}, so I can't handle open-ended requests right now. Everything "
                 "else still works: tasks, monitoring, status, memory and commands. Say 'help' for what I can do "
                 "without a model.", intent, kind="error")
-        assembled = await self.context.build(text, self.history[:-1])
+        assembled = await self.context.build(text, self.history[:-1], session_id=self.session_id)
         messages = assembled.messages
         if self._advisory:
             messages.insert(1, ChatMessage("system", "The user is asking for advice. Recommend what to do and why; "
@@ -1431,7 +1453,11 @@ class Orchestrator:
         except NoModelAvailable:
             profile = self._profile(text, tools=False)   # no tool-capable model: talk, but can't act
             tool_schemas = []
-        ctx = ToolContext(actor=Actor.user(svc.user), cwd=self._work_root(), dry_run=intent.dry_run, clock=svc.clock,
+        # content from images, documents or the screen in play: the model may look, but anything more waits for
+        # the user's explicit approval (Phase 4)
+        external = assembled.external
+        ctx = ToolContext(actor=Actor("user", svc.user, svc.user, interactive=True, external=external),
+                          cwd=self._work_root(), dry_run=intent.dry_run, clock=svc.clock,
                           data_dir=str(svc.config.data_path))
         model_name = None
         notes: list[str] = []
@@ -1463,6 +1489,9 @@ class Orchestrator:
                 if isinstance(outcome, Response):
                     return outcome
                 result, prov = outcome
+                if call.name in EXTERNAL_CONTENT_TOOLS and not ctx.actor.external:
+                    from dataclasses import replace
+                    ctx = replace(ctx, actor=Actor("user", svc.user, svc.user, interactive=True, external=True))
                 tool = svc.registry.get(call.name)
                 if tool is not None and tool.spec.level > 0 and result.get("ok") and \
                         result.get("status") != ExecStatus.DRY_RUN.value:
@@ -1544,7 +1573,7 @@ class Orchestrator:
             task = self._user_task(f"{call.name} for: {user_text[:80]}", title=_short_title(what),
                                    steps=[Step(tool.preview(call.arguments) if tool else call.name, call.name,
                                                call.arguments)], policy=TaskPolicy(on_step_failure="fail"),
-                                   cwd=ctx.cwd)
+                                   cwd=ctx.cwd, external=ctx.actor.external)
             try:
                 done = await svc.pool.wait_for(task.id, [S.COMPLETED, S.FAILED, S.WAITING, S.BLOCKED, S.CANCELLED],
                                                timeout=20.0)
@@ -1567,13 +1596,16 @@ class Orchestrator:
         if execution.status == ExecStatus.NEEDS_APPROVAL:
             task = self._user_task(f"{call.name} for: {user_text[:80]}", title=_short_title(execution.preview),
                                    steps=[Step(execution.preview, call.name, execution.args)],
-                                   policy=TaskPolicy(on_step_failure="fail"), cwd=ctx.cwd)
+                                   policy=TaskPolicy(on_step_failure="fail"), cwd=ctx.cwd,
+                                   external=ctx.actor.external)
             try:
                 await svc.pool.wait_for(task.id, [S.WAITING, S.COMPLETED, S.FAILED, S.BLOCKED], timeout=5.0)
             except TimeoutError:
                 pass
             pending = [a for a in svc.approvals.pending() if a.task_id == task.id]
-            return Response(f"That needs your approval: {execution.preview}. Proceed?", IntentKind.CHAT,
+            why = " (it was suggested after reading an image, document or the screen, so I'm checking with you)" \
+                if ctx.actor.external else ""
+            return Response(f"That needs your approval: {execution.preview}{why}. Proceed?", IntentKind.CHAT,
                             kind="question", task_id=task.id, approval_id=pending[0].id if pending else None)
         prov = execution.result.provenance if execution.result and execution.result.provenance else \
             Provenance(ProvenanceKind.TOOL_OUTPUT, call.name)

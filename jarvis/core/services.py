@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from jarvis.monitoring.metrics import MetricsSource
     from jarvis.monitoring.service import MonitoringService
     from jarvis.notifications.manager import NotificationManager
+    from jarvis.perception.service import PerceptionService
     from jarvis.permissions.manager import ApprovalManager, PermissionManager
     from jarvis.projects.manager import ProjectManager
     from jarvis.state.engine import StateEngine
@@ -65,6 +66,7 @@ class Services:
     monitoring: "MonitoringService | None" = None
     presence: "Presence | None" = None
     intelligence: "IntelligenceService | None" = None
+    perception: "PerceptionService | None" = None
     user: str = "owner"
     simulated: bool = False
     extra: dict[str, Any] = field(default_factory=dict)

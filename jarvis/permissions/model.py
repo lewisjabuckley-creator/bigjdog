@@ -38,6 +38,10 @@ class Actor:
     # the automation or agent whose work this is (a task it created): grants made to that subject apply,
     # and nothing more — a scheduled task never borrows the user's authority
     delegated_by: str | None = None
+    # Phase 4: the request is being made while content from images, documents, files or the screen is in play.
+    # That content is data, not instructions, so nothing beyond observing runs on the strength of the user's
+    # request alone: every such action needs the user's explicit approval (standing grants don't apply either).
+    external: bool = False
 
     @property
     def subject(self) -> str:

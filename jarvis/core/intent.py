@@ -65,6 +65,9 @@ class IntentKind(StrEnum):
     PLAN_SHOW = "plan_show"
     PLAN_DETAILS = "plan_details"        # "what are these files?", "what did you find?"
     PLAN_HISTORY = "plan_history"
+    PERCEIVE = "perceive"                # about an image, screenshot or document the user shared (Phase 4)
+    INPUTS = "inputs"                    # "what can you see?", "what inputs do you have?"
+    SCREEN = "screen"                    # screen awareness: on / off / look
     AUTONOMY = "autonomy"
     CHAT = "chat"
 

@@ -52,6 +52,13 @@ class ProvenanceKind(StrEnum):
     MODEL_KNOWLEDGE = "model_knowledge"
     INFERENCE = "inference"
     CONFIGURATION = "configuration"
+    # perception (Phase 4): what the user showed JARVIS, and what was read from it
+    IMAGE = "image"                  # an image the user supplied
+    SCREENSHOT = "screenshot"        # a screenshot the user supplied
+    SCREEN_CAPTURE = "screen_capture"  # JARVIS captured the screen (only when the user enabled it)
+    DOCUMENT = "document"            # a document or file the user supplied
+    OCR = "ocr"                      # text read from an image by an OCR engine
+    VISION = "vision_model"          # a vision model's reading of an image (model inference: may be wrong)
 
 
 @dataclass(frozen=True)

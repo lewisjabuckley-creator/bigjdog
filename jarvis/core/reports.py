@@ -150,6 +150,8 @@ def status_report(svc: Services) -> str:
     if "resources.gpu_percent" in r:
         lines.append(f"GPU: {_fmt(r.get('resources.gpu_percent'))}")
     lines.append(f"Network: {str(svc.state.value('network.state', 'unknown')).replace('_', ' ')}")
+    if svc.perception is not None and svc.perception.screen.mode.value != "off":
+        lines.append(f"Screen awareness: {svc.perception.screen.mode.value.replace('_', ' ')}")
     lines.append(f"Mode: {svc.modes.current.value}{' (quiet)' if svc.modes.quiet else ''}"
                  f"{' (private)' if svc.modes.private else ''}")
     if svc.state.is_stale("resources.cpu_percent") and cpu is not None:

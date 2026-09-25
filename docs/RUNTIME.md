@@ -164,7 +164,10 @@ registry) → verification → audit, like a typed command.
 | `POST /v1/tasks/{id}/pause\|resume\|cancel` | Control, with your authority. |
 | `GET /v1/events?since=&types=&task_id=&min_severity=&limit=` | The event log. |
 | `GET /v1/notifications?state=` · `POST /v1/notifications/ack` (`{"ids"?}`) · `POST /v1/notifications/{id}/ack` | Notifications and acknowledgement. |
-| `POST /v1/conversation` | `{"text", "request_id", "session"?, "cwd"?, "stream"?}`; with `stream` the answer comes as NDJSON (`token` items, then one `response`). |
+| `POST /v1/conversation` | `{"text", "request_id", "session"?, "cwd"?, "stream"?, "attachments"?}`; with `stream` the answer comes as NDJSON (`token` items, then one `response`). Attachments (up to 10) are `{"path"}` for a file on this computer or `{"name", "data"}` with base64 content. |
+| `GET /v1/inputs?session=&limit=` · `POST /v1/inputs` · `GET /v1/inputs/{id}` · `DELETE /v1/inputs/{id}` | Images and documents shared with JARVIS: list, upload without a message (`{"name", "data"}` or `{"path"}`), details (with what was learned), forget (deletes the copy, cached results and memories). |
+| `GET /v1/perception` | Capabilities ("what can you see?"), vision model, OCR, screen, devices. |
+| `GET/POST /v1/perception/screen` · `POST /v1/perception/screen/look` | Screen awareness: its mode, switching it (`{"mode": "off" \| "on_request" \| "watching"}`; the token is the user's), and looking now (only while it's on). |
 | `GET /v1/conversation/requests/{id}` | A turn's stored answer. |
 | `POST /v1/sessions/attach` · `/v1/sessions/detach` · `GET /v1/stream?client_id=` | Presence, and the live notification stream (NDJSON). |
 | `GET /v1/away` · `GET/POST /v1/briefing` | "What happened while I was away?" and the briefing. |
@@ -184,6 +187,8 @@ Phase 2 uses the existing event bus and event types (`UPPER_SNAKE` names). Impor
 | system.* | `HEALTH_CHANGED`, `SUBSYSTEM_DEGRADED`, `SUBSYSTEM_RECOVERED`, `RESOURCE_THRESHOLD_EXCEEDED`/`CLEARED`, `NETWORK_CHANGED` |
 | notification.created / acknowledged | `NOTIFICATION_CREATED`, `NOTIFICATION_ACKNOWLEDGED` |
 | interfaces, scheduler | `UI_ATTACHED`, `UI_DETACHED`, `AUTOMATION_TRIGGERED`, `SCHEDULE_MISSED`, `BRIEFING_READY` |
+| inputs and perception (Phase 4) | `INPUT_RECEIVED`, `INPUT_REJECTED`, `INPUT_FORGOTTEN`, `PERCEPTION_STARTED`, `PERCEPTION_COMPLETED`, `PERCEPTION_FAILED`, `OCR_COMPLETED` |
+| screen (Phase 4, only while the user has it on) | `SCREEN_AWARENESS_CHANGED`, `SCREEN_CAPTURED`, `SCREEN_STATE_CHANGED`, `SCREEN_ERROR_DETECTED`, `DIALOG_APPEARED`, `APPLICATION_CHANGED`, `APPLICATION_CLOSED`, `BUILD_FAILED`, `BUILD_COMPLETED`, `IMPORTANT_UI_CHANGE` |
 
 Events are operational: what happened, to what, why. They never contain the model's reasoning.
 

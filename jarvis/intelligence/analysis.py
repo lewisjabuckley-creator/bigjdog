@@ -557,8 +557,34 @@ def verify_citations(args: dict[str, Any]) -> dict[str, Any]:
             "checks": [{"check": "claims found in their sources", "passed": not unsupported}]}
 
 
+def verify_command(args: dict[str, Any]) -> dict[str, Any]:
+    """A check command run again by the verifier (e.g. "python -c 'import yaml'"): its exit code decides."""
+    result = args.get("result") or {}
+    expected = int(args.get("expect_exit", 0))
+    what = args.get("what") or "the check"
+    code = result.get("exit_code") if isinstance(result, dict) else None
+    if code is None:
+        return {"quality": Quality.UNVERIFIED.value, "detail": f"{what} didn't run", "resolved": None}
+    if code == expected:
+        return {"quality": Quality.VERIFIED.value, "detail": f"{what} passes now", "resolved": True}
+    err = (result.get("stderr") or result.get("stdout") or "").strip().splitlines()
+    return {"quality": Quality.FAILED.value, "detail": f"{what} still fails" + (f": {err[-1][:160]}" if err else ""),
+            "resolved": False}
+
+
+def verify_screen(args: dict[str, Any]) -> dict[str, Any]:
+    """Visual verification: the error message is (or isn't) still on screen."""
+    result = args.get("result") or {}
+    passed = result.get("passed") if isinstance(result, dict) else None
+    detail = (result.get("detail") if isinstance(result, dict) else "") or "the screen couldn't be checked"
+    if passed is None:
+        return {"quality": Quality.UNVERIFIED.value, "detail": f"not checked on screen: {detail}", "resolved": None}
+    return {"quality": (Quality.VERIFIED if passed else Quality.FAILED).value, "detail": detail,
+            "resolved": bool(passed)}
+
+
 COMPARATORS = {"performance": verify_performance, "disk": verify_disk, "backup": verify_backup,
-               "citations": verify_citations}
+               "citations": verify_citations, "command": verify_command, "screen": verify_screen}
 
 
 def _size(value: Any) -> str:

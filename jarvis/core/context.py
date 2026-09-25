@@ -29,6 +29,7 @@ class AssembledContext:
     messages: list[ChatMessage]
     provenance: list[Provenance] = field(default_factory=list)
     memory_ids: list[str] = field(default_factory=list)
+    external: bool = False       # content from images/documents/the screen is in the context (Phase 4)
 
 
 class ContextAssembler:
@@ -95,7 +96,8 @@ class ContextAssembler:
         return ("PLANS (JARVIS's own work, from the plan record; answer questions about it from this, and say so "
                 "if something isn't here):\n" + "\n".join(lines))
 
-    async def build(self, user_text: str, history: list[ChatMessage]) -> AssembledContext:
+    async def build(self, user_text: str, history: list[ChatMessage], *,
+                    session_id: str | None = None) -> AssembledContext:
         svc = self.svc
         eff = svc.modes.effective()
         system = personality.system_prompt(verbosity=svc.modes.verbosity(), humor=eff.policy.humor and svc.config.ui.humor,
@@ -107,6 +109,13 @@ class ContextAssembler:
         if plans:
             blocks.append(plans)
             provs.append(Provenance(ProvenanceKind.DATABASE, "plan record"))
+        external = False
+        if svc.perception is not None:
+            shared = svc.perception.context_block(session_id)
+            if shared:
+                from jarvis.perception.safety import STANDING_RULE
+                blocks.append(STANDING_RULE + "\n" + shared)
+                external = True
         project = svc.projects.active()
         memory_ids: list[str] = []
         if svc.config.memory.enabled:
@@ -137,7 +146,7 @@ class ContextAssembler:
             content = past.content if len(past.content) <= 2000 else past.content[:2000] + "…"
             messages.append(ChatMessage(past.role, content))
         messages.append(ChatMessage("user", user_text))
-        return AssembledContext(messages, provs, memory_ids)
+        return AssembledContext(messages, provs, memory_ids, external)
 
 
 def environment_note() -> str:

@@ -340,6 +340,21 @@ class NotificationManager:
         if p.get("plan_id") and t in (EventType.TASK_COMPLETED, EventType.TASK_FAILED, EventType.TASK_BLOCKED,
                                       EventType.TASK_INTERRUPTED):
             return None         # a step of a plan: the plan reports (approvals still notify, below)
+        # screen awareness (Phase 4): only what matters interrupts; the rest is recorded as events
+        if t in (EventType.SCREEN_ERROR_DETECTED, EventType.BUILD_FAILED, EventType.DIALOG_APPEARED,
+                 EventType.BUILD_COMPLETED) and e.source == "screen":
+            evidence = str(p.get("evidence") or "")[:160]
+            where = f" in {p['active_app']}" if p.get("active_app") else ""
+            if t == EventType.BUILD_FAILED:
+                return NP.IMPORTANT, f"The build failed{where}", evidence, f"screen-build-failed:{evidence[:60]}"
+            if t == EventType.SCREEN_ERROR_DETECTED:
+                return NP.IMPORTANT, f"An error appeared on screen{where}", evidence, f"screen-error:{evidence[:60]}"
+            if t == EventType.DIALOG_APPEARED:
+                if p.get("permission"):
+                    return NP.IMPORTANT, f"A permission dialog has appeared{where}", evidence, \
+                        f"screen-permission:{evidence[:60]}"
+                return NP.INFORMATIONAL, f"A dialog appeared{where}", evidence, None
+            return NP.INFORMATIONAL, f"The build finished{where}", evidence, None
         if t == EventType.PLAN_COMPLETED:
             if str(p.get("created_by", "")).startswith("system:reactions"):
                 return NP.IMPORTANT, f"I looked into it: {p.get('title')}", p.get("result", ""), \

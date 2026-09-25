@@ -119,6 +119,8 @@ class PermissionManager:
 
     # -- decisions ----------------------------------------------------------------
     def baseline(self, actor: Actor) -> PermissionLevel:
+        if actor.external:
+            return PermissionLevel.OBSERVE        # external content in play: anything more needs explicit approval
         if actor.interactive:
             return PermissionLevel(self.config.interactive_level)
         return PermissionLevel(self.config.automation_level)
@@ -130,7 +132,11 @@ class PermissionManager:
                             basis="baseline")
         subjects = self._subjects(request.actor, request.task_id)
         now = self.clock.now()
-        for g in self.list_grants():
+        grants = self.list_grants()
+        if request.actor.external:
+            # only the user's explicit approval of this very task counts (never a standing grant)
+            grants = [g for g in grants if request.task_id and g.task_id == request.task_id]
+        for g in grants:
             if g.level >= request.level and g.active(now) and g.covers(
                     subjects=subjects, tool=request.tool, paths=request.paths,
                     project_id=request.project_id, task_id=request.task_id):
@@ -139,7 +145,9 @@ class PermissionManager:
                 return Decision(True, reason=f"delegated: {g.describe()}", basis="grant", grant_id=g.id)
         if request.actor.interactive:
             return Decision(False, needs_approval=True, basis="permission",
-                            reason=f"{request.tool} requires {request.level.label} authorization")
+                            reason=(f"{request.tool} was proposed while reading an image, document or the screen, so "
+                                    "it needs your explicit approval") if request.actor.external else
+                            f"{request.tool} requires {request.level.label} authorization")
         self._emit(EventType.PERMISSION_DENIED, {"tool": request.tool, "actor": request.actor.subject,
                                                  "level": request.level.label}, Severity.WARNING)
         return Decision(False, basis="permission",

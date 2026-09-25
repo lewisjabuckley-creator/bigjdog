@@ -339,4 +339,57 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        4,
+        """
+        CREATE TABLE observations (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            origin TEXT NOT NULL,
+            session_id TEXT,
+            project_id TEXT,
+            name TEXT NOT NULL,
+            mime TEXT,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            sha256 TEXT,
+            path TEXT,
+            source_path TEXT,
+            width INTEGER,
+            height INTEGER,
+            pages INTEGER,
+            ordinal INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            error TEXT,
+            sensitivity TEXT NOT NULL DEFAULT 'normal',
+            labels TEXT NOT NULL DEFAULT '[]',
+            derived TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            expires_at REAL
+        );
+        CREATE INDEX idx_observations_session ON observations(session_id, created_at);
+        CREATE INDEX idx_observations_sha ON observations(sha256);
+        CREATE INDEX idx_observations_kind ON observations(kind, created_at);
+
+        CREATE TABLE perception_cache (
+            key TEXT PRIMARY KEY,
+            sha256 TEXT NOT NULL,
+            op TEXT NOT NULL,
+            result TEXT NOT NULL,
+            model TEXT,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX idx_perception_cache_sha ON perception_cache(sha256);
+
+        CREATE TABLE screen_states (
+            id TEXT PRIMARY KEY,
+            ts REAL NOT NULL,
+            active_app TEXT,
+            window_title TEXT,
+            observation_id TEXT,
+            data TEXT NOT NULL
+        );
+        CREATE INDEX idx_screen_states_ts ON screen_states(ts);
+        """,
+    ),
 ]

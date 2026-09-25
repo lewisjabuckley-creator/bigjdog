@@ -102,6 +102,8 @@ async def interactive_embedded(args: argparse.Namespace) -> int:
     svc.notifications.sinks.append(sink)
     label = " (simulation)" if sim else ""
     print(f"JARVIS {__version__}{label} (embedded) — {report.greeting()}  Type 'help', or /quit to exit.")
+    if svc.perception is not None and svc.perception.screen.mode.value != "off":
+        print(f"● {svc.perception.screen.describe_mode()}")
 
     async def idle_drain() -> None:
         while True:
@@ -109,6 +111,7 @@ async def interactive_embedded(args: argparse.Namespace) -> int:
             svc.notifications.drain_if_idle(30)
 
     drainer = asyncio.create_task(idle_drain())
+    pending = _Pending()
     try:
         while True:
             svc.notifications.set_activity("idle")
@@ -118,12 +121,13 @@ async def interactive_embedded(args: argparse.Namespace) -> int:
                 print()
                 break
             line = _clean_input(line)
-            if not line:
+            if not line and not pending.paths:
                 continue
             if line.startswith("/"):
                 if line in ("/quit", "/exit", "/q"):
                     break
-                print(await slash(line, runtime, sim))
+                queued = pending.command(line)
+                print(queued if queued is not None else await slash(line, runtime, sim))
                 continue
             svc.notifications.set_activity("typing")
             streaming = {"started": False}
@@ -136,10 +140,14 @@ async def interactive_embedded(args: argparse.Namespace) -> int:
 
             print("jarvis › …", end="", flush=True)
             try:
-                response = await orch.handle(line, on_token=on_token, cwd=os.getcwd())
+                from jarvis.perception.inputs import Attachment
+                response = await orch.handle(line, on_token=on_token, cwd=os.getcwd(),
+                                             attachments=[Attachment(path=p) for p in pending.take()])
             except Exception as exc:  # never let the interface die on one bad turn
                 print(f"\rjarvis › internal error: {exc}")
                 continue
+            finally:
+                pending.done()
             if response.streamed:
                 print()
                 extra = response.render(include_text=False)
@@ -183,8 +191,17 @@ async def slash(line: str, runtime: Runtime, sim: SimulatedEnvironment | None) -
         return debug_dump(svc)
     if cmd == "sim":
         return sim.control(rest) if sim else "not running in simulation mode (start with --simulate)"
-    return "commands: /tasks [all], /events [n], /approvals, /grants, /revoke <id>, /health, /status, /debug, " \
-           "/sim ..., /quit"
+    if cmd == "inputs" and svc.perception is not None:
+        return format_inputs([o.to_api() for o in svc.perception.store.recent(None, limit=int(rest or 15))])
+    if cmd == "perception" and svc.perception is not None:
+        return await svc.perception.capabilities_text()
+    if cmd == "screen" and svc.perception is not None:
+        mode = {"on": "on_request", "off": "off", "watch": "watching"}.get(rest.strip())
+        if mode:
+            return svc.perception.screen.set_mode(mode, actor_kind="user", actor_id=svc.user)[1]
+        return svc.perception.screen.describe_mode()
+    return "commands: /attach <file>, /paste, /attachments, /clear, /inputs, /perception, /screen [on|off|watch], " \
+           "/tasks [all], /events [n], /approvals, /grants, /revoke <id>, /health, /status, /debug, /sim ..., /quit"
 
 
 def format_tasks(svc: Any, all_tasks: bool = False) -> str:
@@ -220,7 +237,10 @@ def debug_dump(svc: Any) -> str:
 
 async def cmd_ask(args: argparse.Namespace) -> int:
     async def run(runtime: Runtime, report: Any, sim: Any) -> int:
-        response = await runtime.orchestrator(args.session).handle(" ".join(args.text), cwd=os.getcwd())
+        from jarvis.perception.inputs import Attachment
+        response = await runtime.orchestrator(args.session).handle(
+            " ".join(args.text), cwd=os.getcwd(),
+            attachments=[Attachment(path=os.path.abspath(p)) for p in getattr(args, "attach", None) or []])
         print(response.render())
         return 0 if response.kind != "error" else 1
     return await _with_runtime(args, run)
@@ -475,6 +495,82 @@ class _NotificationStream(threading.Thread):
         self.stopped.set()
 
 
+def format_inputs(rows: list[dict[str, Any]]) -> str:
+    """What the user has shared (newest first): handle, name, when, and what was learned from it."""
+    if not rows:
+        return "Nothing shared yet. Drag an image or document into this window, /attach <file>, or /paste."
+    lines = []
+    for o in rows:
+        when = time.strftime("%d %b %H:%M", time.localtime(o["created_at"]))
+        name = f" ({o['name']})" if o.get("name") and o["name"] != o["handle"] else ""
+        learned = f": {_clip(o['summary'], 90)}" if o.get("summary") else ""
+        gone = "" if o.get("available") else " [copy deleted]"
+        lines.append(f"{o['handle']}{name}, {when}{learned}{gone}")
+    return "\n".join(lines)
+
+
+class _Pending:
+    """Files queued with /attach or /paste, sent with the next message (Phase 4)."""
+
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+        self.temp: list[str] = []       # clipboard images saved by /paste: deleted once sent or cleared
+
+    def command(self, line: str) -> str | None:
+        """Handle /attach, /paste, /attachments, /clear; None if the line is another command."""
+        import shlex
+        cmd, _, rest = line[1:].partition(" ")
+        if cmd == "attach":
+            if not rest.strip():
+                return "Usage: /attach <file> [more files]  (or drag files into this window)"
+            try:
+                parts = shlex.split(rest, posix=sys.platform != "win32")
+            except ValueError:
+                parts = [rest]
+            added, missing = [], []
+            for raw in parts:
+                path = os.path.abspath(os.path.expanduser(raw.strip('"\'')))
+                (added if os.path.isfile(path) else missing).append(path)
+            self.paths += [p for p in added if p not in self.paths]
+            text = ""
+            if added:
+                text = f"Attached {', '.join(os.path.basename(p) for p in added)}: it goes with your next message."
+            if missing:
+                text += (" " if text else "") + "Not found: " + ", ".join(missing)
+            return text
+        if cmd == "paste":
+            from jarvis.perception.clipboard import grab_image
+            path, why = grab_image()
+            if path is None:
+                return f"Nothing pasted: {why}."
+            self.paths.append(path)
+            self.temp.append(path)
+            return "Pasted the clipboard image: it goes with your next message (say what you'd like me to do with it)."
+        if cmd in ("attachments", "attached"):
+            return ("Waiting to send: " + ", ".join(os.path.basename(p) for p in self.paths)) if self.paths else \
+                "Nothing attached."
+        if cmd == "clear":
+            self.paths = []
+            self.done()
+            return "Attachments cleared."
+        return None
+
+    def take(self) -> list[str]:
+        paths, self.paths = self.paths, []
+        return paths
+
+    def done(self) -> None:
+        """After a message went (or the queue was cleared): delete the pasted clipboard images it carried. JARVIS
+        keeps its own copy of what it received, under its retention rules, so no stray copy stays in the temp
+        folder."""
+        for path in [t for t in self.temp if t not in self.paths]:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.temp.remove(path)
+
+
 def _attach(client: Any, session: str, client_id: str | None = None) -> dict[str, Any]:
     return client.post("/v1/sessions/attach", {"kind": "cli", "session": session, "client_id": client_id})
 
@@ -566,15 +662,22 @@ def interactive_client(args: argparse.Namespace) -> int:
         "No language model is available, so I'm running on deterministic capabilities only."
     print(f"JARVIS {__version__}{label} — connected to the runtime (pid {att['runtime']['pid']}). {model} "
           + " ".join(att.get("model_issues") or []))
+    if att.get("screen"):
+        print(f"● {att['screen']}")
     recovered = att.get("recovered") or []
     for item in recovered:
         summary = item["summary"] if isinstance(item, dict) else str(item)
         print(f"● {summary}" + ("" if "'continue'" in summary else " Say 'continue' to resume."))
     for line in _returning_lines(att, skip={item["id"] for item in recovered if isinstance(item, dict)}):
         print(line)
-    print("Type 'help', or /quit to leave (JARVIS keeps running in the background).")
+    if att.get("screen") in ("on_request", "watching"):
+        print("● Screen awareness is ON (" + ("watching" if att["screen"] == "watching" else "when you ask") +
+              "). Say 'turn off screen awareness' to stop.")
+    print("Type 'help', or /quit to leave (JARVIS keeps running in the background). Share an image or document by "
+          "dragging it into this window, /attach <file>, or /paste.")
     stream = _NotificationStream(client, client_id, args.session, prompt)
     stream.start()
+    pending = _Pending()
     try:
         while True:
             stream.at_prompt.set()
@@ -586,11 +689,15 @@ def interactive_client(args: argparse.Namespace) -> int:
             finally:
                 stream.at_prompt.clear()
             line = _clean_input(line)
-            if not line:
+            if not line and not pending.paths:
                 continue
             if line.startswith("/"):
                 if line in ("/quit", "/exit", "/q"):
                     break
+                queued = pending.command(line)
+                if queued is not None:
+                    print(queued)
+                    continue
                 try:
                     print(client_slash(line, client))
                 except Exception as exc:
@@ -598,7 +705,8 @@ def interactive_client(args: argparse.Namespace) -> int:
                 continue
             request_id = uuid.uuid4().hex
             body = {"text": line, "session": args.session, "request_id": request_id, "cwd": os.getcwd(),
-                    "client_id": client_id, "stream": True}
+                    "client_id": client_id, "stream": True,
+                    "attachments": [{"path": p} for p in pending.take()]}
             for attempt in (1, 2):
                 streaming = {"started": False}
                 response = None
@@ -632,6 +740,7 @@ def interactive_client(args: argparse.Namespace) -> int:
                 if response is not None:
                     _print_response(response, streaming["started"])
                 break
+            pending.done()
     finally:
         stream.stop()
         try:
@@ -668,8 +777,19 @@ def client_slash(line: str, client: Any) -> str:
         return json.dumps(client.get("/v1/state"), indent=1, default=str)
     if cmd == "sim":
         return client.post("/v1/sim", {"command": rest})["text"]
-    return "commands: /tasks [all], /task <id>, /events [n], /approvals, /grants, /health, /status, /away, /state, " \
-           "/sim ..., /quit"
+    if cmd == "inputs":
+        return format_inputs(client.get("/v1/inputs", limit=int(rest or 15))["inputs"])
+    if cmd == "perception":
+        data = client.get("/v1/perception")
+        return "\n".join(f"{c['name']}: {c['state'].upper()}" + (f" — {c['detail']}" if c["detail"] else "")
+                         for c in data["capabilities"])
+    if cmd == "screen":
+        mode = {"on": "on_request", "off": "off", "watch": "watching"}.get(rest.strip())
+        if mode:
+            return client.post("/v1/perception/screen", {"mode": mode})["message"]
+        return client.get("/v1/perception/screen")["description"]
+    return "commands: /attach <file>, /paste, /attachments, /clear, /inputs, /perception, /screen [on|off|watch], " \
+           "/tasks [all], /task <id>, /events [n], /approvals, /grants, /health, /status, /away, /state, /sim ..., /quit"
 
 
 # -- one-shot commands in client mode ------------------------------------------------------------------
@@ -701,7 +821,8 @@ def client_ask(args: argparse.Namespace) -> int:
     _mismatch_notice(client)
     with client:
         data = client.converse(" ".join(args.text), request_id=uuid.uuid4().hex, session=args.session,
-                               cwd=os.getcwd())
+                               cwd=os.getcwd(), attachments=[os.path.abspath(p) for p in getattr(args, "attach", None)
+                                                              or []])
     response = data["response"]
     print(response["rendered"])
     return 0 if response.get("kind") != "error" else 1
@@ -1246,6 +1367,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"jarvis {__version__}")
     sub = parser.add_subparsers(dest="command")
     ask = sub.add_parser("ask", help="handle one request and exit")
+    ask.add_argument("--attach", action="append", metavar="FILE",
+                     help="an image, screenshot or document to send with the request (repeatable)")
     ask.add_argument("text", nargs="+")
     sub.add_parser("status", help="compact system status")
     tasks = sub.add_parser("tasks", help="list tasks")

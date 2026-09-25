@@ -57,6 +57,8 @@ def compose_report(plan: Plan) -> str:
     kind = plan.goal.kind
     if kind == "research":
         return _research_report(plan)
+    if kind == "visual_debug":
+        return _visual_debug_report(plan)
     lines: list[str] = []
     analysis = _analysis(plan)
     if analysis:
@@ -103,9 +105,58 @@ def compose_report(plan: Plan) -> str:
     for text in lessons[:2]:
         if "tried" in text or "Last time" in text:
             lines.append(_end(text))
+    screen = _screen_line(plan)
+    if screen:
+        lines.append(screen)
     if any(n.kind == NodeKind.ACTION and n.status == N.DONE for n in plan.nodes) or plan.quality is not None:
         lines.append(f"Result: {describe(plan.quality)}.")
     return "\n".join(line for line in lines if line) or "Nothing to report."
+
+
+def _screen_line(plan: Plan) -> str:
+    """The visual check at the end of a plan that started from an image (reported, not decisive)."""
+    node = plan.node("visual_check")
+    if node is None or node.status != N.DONE:
+        return ""
+    check = (plan.facts.get(node.id) or {}).get("check") or {}
+    passed, detail = check.get("passed"), check.get("detail") or "not checked"
+    if passed is True:
+        return f"On screen: {_end(detail)}"
+    if passed is False:
+        return f"On screen: {_end(detail)} (It may just need closing.)"
+    return f"On screen: {_end(detail)}"
+
+
+def _visual_debug_report(plan: Plan) -> str:
+    lines = []
+    seen = (plan.facts.get("perceive") or {}).get("seen") or {}
+    if seen.get("finding"):
+        lines.append(f"From the image: {_end(seen['finding'])}")
+    for node in plan.nodes:
+        if node.id.endswith("locate") and node.status == N.DONE:
+            found = []
+            for key, value in (plan.facts.get(node.id) or {}).items():
+                if key.startswith("find_") and isinstance(value, dict):
+                    found += [e["path"] for e in value.get("entries", [])[:2]]
+            if found:
+                lines.append("In your project: " + ", ".join(dict.fromkeys(found)) + ".")
+        if node.id.endswith("reproduce") and node.status == N.DONE:
+            tests = (plan.facts.get(node.id) or {}).get("tests") or {}
+            code = tests.get("exit_code")
+            if code is not None:
+                lines.append("The tests " + ("pass, so the error didn't reproduce here." if code == 0 else
+                                             f"fail (exit code {code}), so it reproduces."))
+    explain_node = next((n for n in plan.nodes if n.id.endswith("explain")), None)
+    written = (plan.facts.get(explain_node.id) or {}).get("written") if explain_node else None
+    report = written.get("report") if isinstance(written, dict) else None
+    if report:
+        lines.append(f"Likely cause (written by {written.get('model', 'the model')} from the evidence above; check "
+                     f"before relying on it):\n{report.strip()}")
+    elif explain_node is not None and explain_node.status != N.DONE:
+        lines.append("I couldn't work out the cause: " + (explain_node.error or explain_node.note or
+                                                          "no language model was available") + ".")
+    lines.append("I haven't changed any code.")
+    return "\n".join(lines)
 
 
 def details(plan: Plan) -> str:

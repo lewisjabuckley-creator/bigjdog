@@ -37,6 +37,8 @@ Each data directory has its own runtime, so a simulated runtime never touches yo
 | Persistent runtime (in-process) | `python -m pytest tests/test_runtime_lifecycle.py tests/test_scheduler.py tests/test_api.py` | nothing | ~10 s |
 | Planning and autonomy (Phase 3) | `python -m pytest tests/test_intelligence_units.py tests/test_planning.py tests/test_phase3_scenarios.py` | nothing (starts short-lived busy processes) | ~70 s |
 | Live planning (Phase 3) | `JARVIS_OLLAMA_TESTS=1 python -m pytest tests/integration/test_live_planning.py` | a running Ollama, `gguf` and `numpy` | ~5 s |
+| Perception (Phase 4) | `python -m pytest tests/test_perception.py tests/test_phase4_scenarios.py` | nothing (scripted vision model, fake OCR, simulated screen) | ~3 s |
+| Live vision (Phase 4) | `JARVIS_OLLAMA_TESTS=1 python -m pytest tests/integration/test_live_vision.py` | a running Ollama, `gguf` and `numpy` (vision puppets: no download) | ~5 s |
 | Background runtime processes | `python -m pytest tests/test_daemon_process.py` | POSIX (skipped on Windows) | ~12 s |
 | Live Ollama plumbing | `JARVIS_OLLAMA_TESTS=1 python -m pytest tests/integration` | a running Ollama, `gguf` and `numpy` | ~25 s |
 | Ollama smoke tests for the runtime | `JARVIS_OLLAMA_TESTS=1 python -m pytest tests/integration/test_live_runtime.py` | same | ~6 s |

@@ -169,3 +169,89 @@ def create_puppet(base_url: str, name: str, script: Script, workdir: Path) -> st
             "parameters": {"stop": [IM_END], "temperature": 0, "num_predict": 64}})
         resp.raise_for_status()
     return name
+
+
+# -- vision puppets (Phase 4) -----------------------------------------------------------------------------------------
+#
+# A vision puppet is a puppet language model plus a tiny CLIP projector (a real "mmproj" GGUF with one vision layer
+# and an MLP projector into the puppet's embedding space). Ollama then reports the "vision" capability, accepts images,
+# decodes them and runs them through llama.cpp's real image encoder; the reply stays scripted because the puppet's next
+# token depends only on the current one. It proves images reach the model through the real server (and that a broken
+# image is refused there), not that anything is understood.
+
+V_EMBD, V_HEADS, V_FF, V_PATCH, V_IMAGE = 16, 2, 32, 14, 28
+
+
+def build_projector(path: Path) -> Path:
+    import gguf
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+
+    def small(*shape: int) -> "np.ndarray":
+        return (rng.standard_normal(shape) * 0.02).astype(np.float32)
+
+    positions = (V_IMAGE // V_PATCH) ** 2 + 1
+    writer = gguf.GGUFWriter(str(path), "clip")
+    writer.add_type("mmproj")
+    writer.add_name("jarvis-vision-puppet-projector")
+    writer.add_bool("clip.has_vision_encoder", True)
+    writer.add_bool("clip.use_gelu", True)
+    writer.add_string("clip.projector_type", "mlp")
+    writer.add_uint32("clip.vision.embedding_length", V_EMBD)
+    writer.add_uint32("clip.vision.feed_forward_length", V_FF)
+    writer.add_uint32("clip.vision.block_count", 1)
+    writer.add_uint32("clip.vision.attention.head_count", V_HEADS)
+    writer.add_uint32("clip.vision.projection_dim", N)
+    writer.add_float32("clip.vision.attention.layer_norm_epsilon", 1e-5)
+    writer.add_uint32("clip.vision.image_size", V_IMAGE)
+    writer.add_uint32("clip.vision.patch_size", V_PATCH)
+    writer.add_array("clip.vision.image_mean", [0.5, 0.5, 0.5])
+    writer.add_array("clip.vision.image_std", [0.5, 0.5, 0.5])
+    writer.add_file_type(gguf.LlamaFileType.ALL_F32)
+    ones = np.ones(V_EMBD, dtype=np.float32)
+    zeros = np.zeros(V_EMBD, dtype=np.float32)
+    writer.add_tensor("v.patch_embd.weight", small(V_EMBD, 3, V_PATCH, V_PATCH))
+    writer.add_tensor("v.class_embd", small(V_EMBD))
+    writer.add_tensor("v.position_embd.weight", small(positions, V_EMBD))
+    writer.add_tensor("v.pre_ln.weight", ones)
+    writer.add_tensor("v.pre_ln.bias", zeros)
+    for name in ("attn_q", "attn_k", "attn_v", "attn_out"):
+        writer.add_tensor(f"v.blk.0.{name}.weight", small(V_EMBD, V_EMBD))
+        writer.add_tensor(f"v.blk.0.{name}.bias", zeros)
+    for name in ("ln1", "ln2"):
+        writer.add_tensor(f"v.blk.0.{name}.weight", ones)
+        writer.add_tensor(f"v.blk.0.{name}.bias", zeros)
+    writer.add_tensor("v.blk.0.ffn_up.weight", small(V_FF, V_EMBD))
+    writer.add_tensor("v.blk.0.ffn_up.bias", np.zeros(V_FF, dtype=np.float32))
+    writer.add_tensor("v.blk.0.ffn_down.weight", small(V_EMBD, V_FF))
+    writer.add_tensor("v.blk.0.ffn_down.bias", zeros)
+    writer.add_tensor("v.post_ln.weight", ones)
+    writer.add_tensor("v.post_ln.bias", zeros)
+    writer.add_tensor("mm.0.weight", small(N, V_EMBD))
+    writer.add_tensor("mm.0.bias", np.zeros(N, dtype=np.float32))
+    writer.add_tensor("mm.2.weight", small(N, N))
+    writer.add_tensor("mm.2.bias", np.zeros(N, dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    return path
+
+
+def create_vision_puppet(base_url: str, name: str, script: Script, workdir: Path) -> str:
+    """A puppet with a projector: Ollama lists it with the vision capability and runs images through it."""
+    model = build_gguf(workdir / f"{name.replace(':', '_')}.gguf", script)
+    projector = build_projector(workdir / f"{name.replace(':', '_')}-mmproj.gguf")
+    files = {}
+    with httpx.Client(base_url=base_url, timeout=120, trust_env=False) as client:
+        for path in (model, projector):
+            data = path.read_bytes()
+            digest = "sha256:" + hashlib.sha256(data).hexdigest()
+            client.post(f"/api/blobs/{digest}", content=data).raise_for_status()
+            files[path.name] = digest
+        resp = client.post("/api/create", json={
+            "model": name, "files": files, "template": TEMPLATE, "stream": False,
+            "parameters": {"stop": [IM_END], "temperature": 0, "num_predict": 64}})
+        resp.raise_for_status()
+    return name

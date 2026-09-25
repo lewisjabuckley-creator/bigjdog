@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 log = get_logger("api")
 
-MAX_BODY = 1_000_000
+MAX_BODY = 60_000_000      # screenshots and documents arrive base64-encoded (inputs are capped separately)
 _REASONS = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
             404: "Not Found", 405: "Method Not Allowed", 409: "Conflict", 413: "Payload Too Large",
             500: "Internal Server Error", 503: "Service Unavailable"}
@@ -288,6 +288,14 @@ class ApiServer:
         r("POST", "/v1/goals", self.create_goal)
         r("GET", "/v1/intelligence", self.intelligence)
         r("POST", "/v1/intelligence/autonomy", self.set_autonomy)
+        r("GET", "/v1/inputs", self.list_inputs)
+        r("POST", "/v1/inputs", self.upload_input)
+        r("GET", "/v1/inputs/{id}", self.get_input)
+        r("DELETE", "/v1/inputs/{id}", self.forget_input)
+        r("GET", "/v1/perception", self.perception)
+        r("GET", "/v1/perception/screen", self.screen)
+        r("POST", "/v1/perception/screen", self.set_screen)
+        r("POST", "/v1/perception/screen/look", self.look_at_screen)
         r("POST", "/v1/runtime/stop", self.stop_runtime)
         r("POST", "/v1/sim", self.simulate)
 
@@ -305,6 +313,7 @@ class ApiServer:
         readiness = svc.extra.get("model_readiness")
         return {"runtime": state["runtime"], "health": state["health"], "tasks": state["tasks"],
                 "workers": state["workers"], "presence": state["presence"], "mode": state["mode"],
+                "screen": svc.perception.screen.status()["mode"] if svc.perception is not None else "off",
                 "model": readiness.summary() if readiness is not None and readiness.can_converse else None,
                 "api": {"host": self.host, "port": self.port}, "text": reports.status_report(svc)}
 
@@ -501,15 +510,23 @@ class ApiServer:
         return {"acknowledged": count}
 
     # -- conversation, presence ----------------------------------------------------------------------
+    def _attachments(self, body: dict[str, Any]) -> list[Any]:
+        from jarvis.perception.inputs import Attachment
+        raw = body.get("attachments") or []
+        if not isinstance(raw, list):
+            raise ApiError(400, "attachments must be a list")
+        return [Attachment.from_api(a) for a in raw[:10]]
+
     async def converse(self, req: Request) -> Any:
         body = req.json()
         text = str(body["text"])
         session = str(body.get("session") or "default")
+        attachments = self._attachments(body)
         if body.get("client_id") and self.svc.presence is not None:
             self.svc.presence.touch(str(body["client_id"]))
         if not body.get("stream"):
             rid, response, replayed = await self.conversations.handle(
-                text, session=session, request_id=body.get("request_id"), cwd=body.get("cwd"))
+                text, session=session, request_id=body.get("request_id"), cwd=body.get("cwd"), attachments=attachments)
             return {"request_id": rid, "response": response, "replayed": replayed}
         assert req.writer is not None
         out = Streamer(req.writer)
@@ -531,7 +548,7 @@ class ApiServer:
         writer_task = asyncio.create_task(pump())
         rid, response, replayed = await self.conversations.handle(
             text, session=session, request_id=body.get("request_id"), cwd=body.get("cwd"),
-            on_token=lambda piece: queue.put_nowait({"type": "token", "text": piece}))
+            on_token=lambda piece: queue.put_nowait({"type": "token", "text": piece}), attachments=attachments)
         queue.put_nowait({"type": "response", "request_id": rid, "response": response, "replayed": replayed})
         queue.put_nowait(None)
         await writer_task
@@ -541,6 +558,70 @@ class ApiServer:
             except ConnectionError:
                 pass
         return 200, _STREAMED
+
+    # -- perception (Phase 4): what interfaces (the CLI now, a HUD later) use to share inputs and see state ------------
+    def _perception(self) -> Any:
+        if self.svc.perception is None:
+            raise ApiError(503, "perception is switched off in the configuration")
+        return self.svc.perception
+
+    async def list_inputs(self, req: Request) -> dict[str, Any]:
+        p = self._perception()
+        session = req.query.get("session")
+        return {"inputs": [o.to_api() for o in p.store.recent(session, limit=int(req.query.get("limit", 50)))]}
+
+    async def upload_input(self, req: Request) -> Any:
+        """Take in an image or document without a message (a HUD drag-and-drop, a phone upload)."""
+        p = self._perception()
+        body = req.json()
+        attachments = self._attachments({"attachments": [body]})
+        taken, problems = p.ingest(attachments, session_id=str(body.get("session") or "default"))
+        if not taken:
+            raise ApiError(422, "; ".join(problems) or "nothing was taken in")
+        return {"input": taken[0].to_api()}
+
+    async def get_input(self, req: Request) -> dict[str, Any]:
+        obs = self._perception().store.get(req.groups[0])
+        if obs is None:
+            raise ApiError(404, "no such input")
+        return {"input": obs.to_api()}
+
+    async def forget_input(self, req: Request) -> dict[str, Any]:
+        obs = self._perception().forget(req.groups[0])
+        if obs is None:
+            raise ApiError(404, "no such input")
+        return {"forgotten": obs.id}
+
+    async def perception(self, req: Request) -> dict[str, Any]:
+        p = self._perception()
+        caps = await p.capabilities(refresh=req.query.get("refresh") == "1")
+        devices = await p.devices.discover()
+        return {"capabilities": [c.to_dict() for c in caps], "screen": p.screen.status(),
+                "devices": devices.to_dict(), "voice": p.voice().status(), "camera": p.camera().status()}
+
+    async def screen(self, req: Request) -> dict[str, Any]:
+        return self._perception().screen.status()
+
+    async def set_screen(self, req: Request) -> dict[str, Any]:
+        """The API token is the user's, so a request here is the user switching screen awareness."""
+        body = req.json()
+        ok, message = self._perception().screen.set_mode(str(body.get("mode") or "off"), actor_kind="user",
+                                                         actor_id=self.svc.user)
+        if not ok:
+            raise ApiError(403, message)
+        return {"ok": True, "message": message, "screen": self._perception().screen.status()}
+
+    async def look_at_screen(self, req: Request) -> dict[str, Any]:
+        from jarvis.perception.screen import ScreenAccessDenied
+        body = req.json() if req.body else {}
+        try:
+            state, obs = await self._perception().screen.look(reason=str(body.get("reason") or "requested via the API"),
+                                                              by=f"user:{self.svc.user}",
+                                                              session_id=body.get("session"))
+        except ScreenAccessDenied as exc:
+            raise ApiError(403, str(exc)) from None
+        return {"state": state.to_dict(), "description": state.describe(),
+                "input": obs.to_api() if obs is not None else None}
 
     async def get_request(self, req: Request) -> dict[str, Any]:
         row = self.svc.db.query_one("SELECT * FROM requests WHERE id=?", (req.groups[0],))
@@ -578,6 +659,9 @@ class ApiServer:
                             "version": __version__},
                 "model": readiness.summary() if readiness is not None and readiness.can_converse else None,
                 "model_issues": list(readiness.issues[:2]) if readiness is not None else [],
+                # screen awareness is never on without the user seeing it: every interface says so when it opens
+                "screen": (svc.perception.screen.describe_mode() if svc.perception is not None and
+                           svc.perception.screen.mode.value != "off" else None),
                 "recovered": ([{"id": r.task_id, "summary": r.summary} for r in recovered if not r.resumed
                                and (t := svc.tasks.get_task(r.task_id)) is not None and not t.outputs.get("plan_id")
                                and t.status in (TaskStatus.PAUSED, TaskStatus.BLOCKED)] +

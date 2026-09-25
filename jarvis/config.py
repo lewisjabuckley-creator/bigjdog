@@ -69,7 +69,7 @@ def _default_profiles() -> dict[str, list[str]]:
         "reasoning": ["qwen2.5:32b", "qwen2.5:14b", "llama3.1:8b"],
         "planning": ["qwen2.5:14b", "llama3.1:8b"],
         "coding": ["qwen2.5-coder:14b", "qwen2.5-coder:7b", "llama3.1:8b"],
-        "vision": ["llama3.2-vision", "llava:13b", "llava"],
+        "vision": ["llama3.2-vision", "llava:13b", "llava", "moondream"],
         "summarization": ["llama3.2:3b", "llama3.1:8b"],
         "classification": ["llama3.2:3b", "llama3.1:8b"],
         "background": ["llama3.2:3b", "llama3.1:8b"],
@@ -239,6 +239,31 @@ class IntelligenceConfig:
 
 
 @dataclass
+class PerceptionConfig:
+    """What JARVIS can take in besides typed text (Phase 4): images, screenshots, documents, the screen.
+
+    Local-first and opt-in: screen capture starts off and only the user can turn it on; images and documents are
+    analysed by local models unless cloud vision is explicitly allowed (and privacy allows cloud at all)."""
+    enabled: bool = True
+    max_input_mb: float = 40.0            # larger inputs are refused
+    max_image_side: int = 1568            # images are shrunk to this before a vision model sees them (needs Pillow)
+    max_image_pixels: int = 40_000_000    # without Pillow an image this large can't be shrunk, so it is refused
+    vision_timeout_s: float = 240.0
+    max_concurrent_vision: int = 1        # vision is heavy: one analysis at a time
+    allow_cloud_vision: bool = False      # also needs privacy.allow_cloud; never for private/secret inputs
+    retention_days: float = 7.0           # stored copies of images/documents; what was learned from them is kept
+    screen_retention_days: float = 1.0    # screen captures are private by default and kept briefly
+    remember_findings: bool = True        # important findings become memories (not the images themselves)
+    ocr: str = "auto"                     # auto | tesseract | vision | off
+    tesseract_path: str = ""              # found on PATH or in the usual install folder when empty
+    screen_mode: str = "off"              # off | on_request | watching (the user changes it; this is the start value)
+    screen_interval_s: float = 30.0       # how often "watching" looks (cheap window check each time)
+    screen_capture_every: int = 4         # watching: a full capture + OCR at most every Nth check (or on a change)
+    document_max_chars: int = 12000       # document text handed to a model in one request
+    device_discovery_ttl_s: float = 300.0
+
+
+@dataclass
 class JarvisConfig:
     general: GeneralConfig = field(default_factory=GeneralConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
@@ -255,6 +280,7 @@ class JarvisConfig:
     resources: ResourcesConfig = field(default_factory=ResourcesConfig)
     briefing: BriefingConfig = field(default_factory=BriefingConfig)
     intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
+    perception: PerceptionConfig = field(default_factory=PerceptionConfig)
     source: str = "defaults"
 
     @property
@@ -401,6 +427,12 @@ def validate(cfg: JarvisConfig) -> None:
         raise ConfigError("resources.low_priority_policy must be pause, slow, wait or continue")
     if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", cfg.briefing.time):
         raise ConfigError("briefing.time must be HH:MM")
+    if cfg.perception.screen_mode not in ("off", "on_request", "watching"):
+        raise ConfigError("perception.screen_mode must be off, on_request or watching")
+    if cfg.perception.ocr not in ("auto", "tesseract", "vision", "off"):
+        raise ConfigError("perception.ocr must be auto, tesseract, vision or off")
+    if cfg.perception.screen_interval_s < 2 or cfg.perception.max_concurrent_vision < 1:
+        raise ConfigError("perception.screen_interval_s must be >= 2 and max_concurrent_vision >= 1")
     if cfg.intelligence.autonomy not in ("low", "normal", "high"):
         raise ConfigError("intelligence.autonomy must be low, normal or high")
     if cfg.intelligence.preview not in ("always", "consequential", "never"):

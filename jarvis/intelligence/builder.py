@@ -31,6 +31,7 @@ from jarvis.intelligence.guard import LoopGuard
 from jarvis.intelligence.memory import PlanMemory
 from jarvis.intelligence.plans import NodeKind, Plan, PlanNode
 from jarvis.intelligence.playbooks import PLAYBOOKS, Blueprint, PlanningContext, compound, step
+from jarvis.intelligence.visual import with_observation
 from jarvis.log import get_logger
 from jarvis.models.base import ChatMessage, ModelError, Purpose
 from jarvis.models.router import TaskProfile
@@ -113,6 +114,8 @@ class PlanBuilder:
             blueprint, source = await self._model_blueprint(goal, ctx)
         if blueprint.problems:
             return BuildResult(None, blueprint.problems, blueprint.notes)
+        if goal.context.get("observations"):
+            blueprint = with_observation(blueprint, goal)      # Phase 4: the image is the plan's first observation
         title = blueprint.title or goal.objective
         if goal.mode == ExecutionMode.DRY_RUN and not title.lower().startswith("dry run"):
             title = "Dry run: " + title[:1].lower() + title[1:]      # a preview must never read like the real thing
@@ -284,7 +287,8 @@ class PlanBuilder:
 
     def insert_gates(self, plan: Plan, actions: list[PlanNode]) -> PlanNode | None:
         """Put one approval gate in front of the actions that need more authority than the plan's baseline."""
-        baseline = self.baseline(plan.interactive)
+        # a plan built from perceived content (an image, a document) asks before anything beyond observing
+        baseline = 0 if plan.goal.context.get("external_content") else self.baseline(plan.interactive)
         gated = [n for n in actions if self.node_level(n) > baseline and not n.meta.get("dry_run_only")
                  and not self._preauthorized(plan, n)
                  and not any(g.kind == NodeKind.GATE and n.id in g.gate_for for g in plan.nodes)]

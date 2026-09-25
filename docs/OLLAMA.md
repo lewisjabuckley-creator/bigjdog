@@ -21,6 +21,20 @@ the machine.
 Pick a model that supports **tool calling** (llama3.1, llama3.2, qwen2.5, qwen3 and mistral-nemo do). Without
 tool calling JARVIS can talk, but it can't act on requests like "create a file" or "check the disk".
 
+### Optional: a vision model, for images and screenshots
+
+JARVIS only sends images to models that can see. Without one it tells you so rather than guessing.
+
+| Your computer | Command | Download |
+|---|---|---|
+| Graphics card with 8 GB+ memory, or Apple Silicon with 16 GB+ | `ollama pull llama3.2-vision` | about 7.9 GB |
+| Most computers (less accurate) | `ollama pull moondream` | about 1.7 GB |
+| In between | `ollama pull llava` | about 4.7 GB |
+
+Also optional: `py -m pip install pillow pypdf` (shrinks large images before the model sees them; reads more
+PDFs). For reading text in images with measured confidence, install Tesseract (on Windows, the UB Mannheim
+installer). JARVIS finds it automatically.
+
 ## 2. Start JARVIS
 
 From the JARVIS folder:
@@ -34,7 +48,7 @@ The first time, this starts the JARVIS runtime in the background ("Starting the 
 background…"). The first line tells you what it found, for example:
 
 ```text
-JARVIS 0.3.0 — connected to the runtime (pid 4120). Talking through llama3.1:8b (local, tools enabled).
+JARVIS 0.4.0 — connected to the runtime (pid 4120). Talking through llama3.1:8b (local, tools enabled).
 ```
 
 If Ollama isn't running, or no model is installed, JARVIS tells you exactly what to do. Everything that doesn't
@@ -82,6 +96,13 @@ Anything conversational now goes to the model, which can use JARVIS's tools:
 - "Analyze this project." (from a project folder), close the window, come back later and ask "What happened
   while I was away?"
 
+With a vision model (see above):
+
+- Drag a screenshot of an error into the window and type "What's wrong with this?", then "How do I fix it?".
+- Press Win+Shift+S, snip part of the screen, type `/paste`, then ask about it.
+- "What can you see?" lists what JARVIS can take in right now.
+- "Turn on screen awareness", then "What's on my screen?"; "stop watching my screen" turns it off.
+
 The deterministic commands from the README (`status`, `what are you doing?`, `stop`, `continue`, `focus mode`...)
 keep working exactly as before and answer instantly.
 
@@ -97,6 +118,7 @@ options = { temperature = 0.3 }        # any Ollama sampling option
 
 [models.profiles]
 conversation = ["qwen2.5:7b", "llama3.1:8b"]   # preferred models, in order
+vision = ["llama3.2-vision", "moondream"]       # used only for images
 ```
 
 In a conversation: "use the qwen2.5:7b model", "use the local model", "which models?", "unload the vision model".
