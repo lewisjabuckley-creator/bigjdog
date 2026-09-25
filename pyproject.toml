@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-os"
+version = "0.4.0"
+description = "A local-first, event-driven personal AI operating environment."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",   # async HTTP + streaming for Ollama and optional cloud adapters
+    "psutil>=5.9",   # cross-platform system/process/hardware telemetry
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+# optional, for images and documents: shrinking large images before a vision model sees them, better PDF reading
+vision = ["pillow>=10", "pypdf>=4"]
+# builds the deterministic "puppet" models used by the live Ollama integration tests
+integration = ["pytest>=8", "gguf>=0.10", "numpy>=1.24"]
+
+[project.scripts]
+jarvis = "jarvis.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["jarvis*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+markers = [
+    "ollama: live tests against a real Ollama server (opt-in: set JARVIS_OLLAMA_TESTS=1)",
+]
